@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+
+# Environment variables and secrets
+.env
+.env.*
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data (raw and processed)
+/data/
+
+# Jupyter
+.ipynb_checkpoints/
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editor settings
+.vscode/
+
+# Model artifacts, experiment tracking and local databases
+*.pt
+*.pth
+*.ckpt
+/mlruns/
+/outputs/
+*.db
