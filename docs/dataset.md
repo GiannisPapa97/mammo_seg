@@ -23,7 +23,7 @@ The Kaggle page lists the license as "Unknown" and has no description. The origi
 
 - 410 images, **108 patients** (the publication speaks of 115 cases). 99 patients have one exam and 9 have two (distinct acquisition dates).
 - The filename is `<file id>_<patient id>_MG_<laterality>_<view>_ANON`. The patient id is the grouping key for splits (confirmed by `README.txt`). `INbreast.csv` has the patient id removed and links by file id only. Its file ids, laterality and view match the DICOM filenames for all 410 images.
-- Views: 203 CC, 206 ML (MLO in the CSV) and one right-breast image with view `FB`. Left/right is balanced (209 / 201).
+- Views: 203 CC, 206 MLO (`ML` in the filenames) and one right-breast image with view `FB`. Left/right is balanced (209 / 201).
 - Two sizes: 3328 x 2560 (243 images) and 4084 x 3328 (167 images). Both occur in every acquisition period.
 - DICOM headers: 16-bit unsigned, `MONOCHROME2` (higher value = brighter, no inversion needed), uncompressed, modality `OT`. There is **no `PixelSpacing`** in the headers; if physical size is needed it has to come from the publication.
 - Actual intensities use 12 bits: the maximum value is at most 4095 in every image, although 16 bits are stored.
@@ -41,25 +41,27 @@ The XML files are Apple property lists (`plistlib` reads them). Each ROI has a n
 - Images without an XML file are exactly the 67 BI-RADS 1 images (no lesions).
 - 7316 ROIs in 343 images. Most are calcifications.
 
-| ROI name | Type | ROIs | Images | Shape |
-|---|---|---|---|---|
-| Calcification | 19 | 4339 | 285 | single point |
-| Calcification | 15 | 2800 | 232 | small polygon (median 9 points, about 88 px area) |
-| Mass | 15 | 116 | 107 | polygon (median 116 points) |
-| Cluster | 9 | 27 | 21 | 200-point ellipse-like region |
-| Spiculated Region | 9 | 14 | 14 | 200-point region |
-| Distortion | 9 | 3 | 3 | 200-point region |
-| Asymmetry | 9 | 2 | 2 | 200-point region |
+The names are normalized to a closed set of lesion types (misspellings merged, see `src/mammo_seg/data/annotations.py`). Counts by lesion type:
 
-The remaining few ROIs have misspelled or empty names (`Espiculated Region`, `Assymetry`, `Calcifications`, `Point 1`, `Unnamed`, empty). Names need normalizing.
+| Lesion type | ROIs | Images | Shape |
+|---|---|---|---|
+| calcification | 7143 | 313 | 4339 single points, 2800 small polygons (median 9 points, about 88 px area), a few larger shapes |
+| mass | 116 | 107 | polygon (median 116 points) |
+| cluster | 27 | 21 | 200-point ellipse-like region |
+| spiculated_region | 16 | 16 | 200-point region |
+| asymmetry | 6 | 6 | 200-point region or polygon |
+| distortion | 3 | 3 | 200-point region |
+| unknown | 5 | 4 | no usable name: `Point 1`, `Point 3`, `Unnamed` (2) and one empty name |
+
+Raw spellings that are merged: `Calcifications`, `Spiculated region`, `Espiculated Region` and `Assymetry`. A name that is not in the mapping raises an error when the manifest is built.
 
 ### Why not calcifications (for now)
 
-There are more of them (about 7100 annotations in 285 images), but 4339 are single points with no extent and the polygons are tiny (about 10 px across at native size). They cannot be downscaled, masks would be dilated points (weak labels), and Dice is not a meaningful metric for them. They need full-resolution patches and detection-style metrics (lesion-level precision and recall, FROC). Cluster regions (27 in 21 images) could join that task.
+There are more of them (7143 annotations in 313 images), but 4339 are single points with no extent and the polygons are tiny (about 10 px across at native size). They cannot be downscaled, masks would be dilated points (weak labels), and Dice is not a meaningful metric for them. They need full-resolution patches and detection-style metrics (lesion-level precision and recall, FROC). Cluster regions (27 in 21 images) could join that task.
 
 ## Masses
 
-- 116 masses in **107 images from 50 patients**. 99 images have one mass, 7 have two and 1 has three. Views are even: 54 CC, 53 ML.
+- 116 masses in **107 images from 50 patients**. 99 images have one mass, 7 have two and 1 has three. Views are even: 54 CC, 53 MLO.
 - Size (equivalent diameter at native resolution): min 62 px, 5th percentile 103, median 234, 95th percentile 706, max 978. Area is 0.03% to 5.8% of the image (median 0.4%).
 - Class imbalance: masses are **0.27% of all pixels** over the whole dataset (1.0% over images that contain a mass).
 - BI-RADS does not select masses: they occur from BI-RADS 2 upward. Positive images by BI-RADS: 2: 22, 3: 13, 4a: 7, 4b: 2, 4c: 12, 5: 43, 6: 8.
@@ -91,7 +93,7 @@ An image is **positive** if it has at least one mass, otherwise **negative**.
 | of which normal, no annotation (BI-RADS 1) | 67 |
 | of which annotated, calcifications or other lesions only | 236 |
 
-Positives by view: 54 CC and 53 ML; by side: 55 left and 52 right; by size: 57 at 3328 x 2560 and 50 at 4084 x 3328.
+Positives by view: 54 CC and 53 MLO; by side: 55 left and 52 right; by size: 57 at 3328 x 2560 and 50 at 4084 x 3328.
 
 Patients (108):
 
@@ -107,7 +109,7 @@ Patients (108):
 
 - 50 patients have at least one positive image (38 mixed + 12 all positive) and 58 have none. In mixed patients the mass is in one breast and the other breast's images are negative.
 - Positive images per positive patient: 1 for 2 patients, 2 for 43, 3 for 1, 4 for 4.
-- The same mass is usually visible in both views: of 52 breasts with two views and a mass, 51 show it in both CC and ML. The two views are near-duplicates.
+- The same mass is usually visible in both views: of 52 breasts with two views and a mass, 51 show it in both CC and MLO. The two views are near-duplicates.
 
 ## Implications for the project
 

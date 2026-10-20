@@ -4,7 +4,7 @@ A reproducible PyTorch framework for segmentation of mammography images, startin
 
 > **Research use only.** This project is not a medical device and its output must not be used for clinical decisions.
 
-**Status:** early setup. Nothing is implemented yet.
+**Status:** early development. The data pipeline starts with a validated manifest of the INbreast dataset; masks, splits, models and training are not implemented yet.
 
 ## Development
 
@@ -29,6 +29,14 @@ scripts/download_data.sh
 ```
 
 It needs `curl` and `unzip`, resumes an interrupted download, and does nothing if the data is already there. The license of this copy is unclear, so do not redistribute the data. See [docs/dataset.md](docs/dataset.md) for what it contains.
+
+Then build the validated manifest (`data/processed/manifest.json`: every image with its metadata and lesions):
+
+```bash
+uv run python -m mammo_seg.data.manifest
+```
+
+See [docs/data-pipeline.md](docs/data-pipeline.md) for the format and checks.
 
 ## License
 
