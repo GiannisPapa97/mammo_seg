@@ -11,6 +11,7 @@ from mammo_seg.data.schema import (
     LesionType,
     Manifest,
     Roi,
+    View,
     image_to_json,
     manifest_from_json,
     polygon_area,
@@ -24,7 +25,7 @@ def make_image(**changes: Any) -> ImageRecord:
         "file_id": "1",
         "patient_id": "a" * 16,
         "laterality": "L",
-        "view": "CC",
+        "view": View.CC,
         "dicom_path": "AllDICOMs/x.dcm",
         "rows": 6,
         "cols": 8,
@@ -129,6 +130,18 @@ def test_manifest_rejects_a_missing_version() -> None:
 def test_invalid_laterality_is_rejected() -> None:
     with pytest.raises(ValidationError, match="laterality"):
         make_image(laterality="X")
+
+
+def test_unknown_view_in_a_file_is_rejected() -> None:
+    text = manifest_json(make_image()).replace('"view":"CC"', '"view":"XX"')
+    with pytest.raises(ValidationError, match="view"):
+        manifest_from_json(text)
+
+
+def test_view_is_an_enum_that_compares_equal_to_its_text() -> None:
+    assert make_image(view=View.MLO).view == "MLO"
+    with pytest.raises(ValidationError, match="view"):
+        make_image(view="CC")
 
 
 def test_unknown_lesion_type_in_a_file_is_rejected() -> None:

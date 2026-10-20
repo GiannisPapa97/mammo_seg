@@ -16,7 +16,7 @@ from mammo_seg.data.manifest import (
     rois_frame,
     write_manifest,
 )
-from mammo_seg.data.schema import ImageRecord, LesionType, Manifest
+from mammo_seg.data.schema import ImageRecord, LesionType, Manifest, View
 
 
 def by_id(dataset_dir: Path) -> dict[str, ImageRecord]:
@@ -54,6 +54,23 @@ def test_view_is_mlo_for_filename_ml_and_csv_mlo(dataset_dir: Path) -> None:
         "22222221": "CC",
         "22222222": "MLO",
     }
+
+
+def test_unexpected_view_in_a_filename_is_an_error(dataset_dir: Path) -> None:
+    write_dicom(
+        dataset_dir / "AllDICOMs" / f"33333333_{'c' * 16}_MG_L_XX_ANON.dcm", 4, 4
+    )
+    with pytest.raises(ManifestError, match="unexpected view 'XX'"):
+        build_manifest(dataset_dir)
+
+
+def test_fb_view_is_kept(dataset_dir: Path) -> None:
+    write_dicom(
+        dataset_dir / "AllDICOMs" / f"33333333_{'c' * 16}_MG_R_FB_ANON.dcm", 4, 4
+    )
+    csv = dataset_dir / "INbreast.csv"
+    csv.write_text(csv.read_text() + "removed;removed;R;FB;201001;33333333;1;1\n")
+    assert by_id(dataset_dir)["33333333"].view is View.FB
 
 
 def test_blank_acr_becomes_none(dataset_dir: Path) -> None:
@@ -102,6 +119,13 @@ def test_images_frame_has_columns_and_derived_labels(dataset_dir: Path) -> None:
         "11111112": True,
         "22222221": False,
         "22222222": False,
+    }
+    assert all(type(view) is str for view in frame.view)
+    assert frame.view.to_dict() == {
+        "11111111": "CC",
+        "11111112": "MLO",
+        "22222221": "CC",
+        "22222222": "MLO",
     }
     assert frame.acr.isna().sum() == 1
     assert str(frame.acr.dtype) == "Int64"

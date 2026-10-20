@@ -41,7 +41,7 @@ Image fields:
 | `file_id` | DICOM filename | Image id, a string |
 | `patient_id` | DICOM filename | Anonymized patient id; the grouping key for splits |
 | `laterality` | DICOM filename | `L` or `R` |
-| `view` | DICOM filename | `CC`, `MLO` or `FB` (the filenames write `ML` for `MLO`) |
+| `view` | DICOM filename | One of `CC`, `MLO` or `FB`; the filenames write `ML` for `MLO`. Any other value is an error |
 | `dicom_path` | DICOM filename | Path of the image relative to the dataset folder |
 | `rows`, `cols` | DICOM header | Image size in pixels |
 | `acquisition_date` | `INbreast.csv` | Year and semester, e.g. `200902` |
@@ -72,7 +72,7 @@ For splitting and analysis, `images_frame(manifest)` gives one row per image (in
 
 `build_manifest` raises `ManifestError` listing every problem it finds, and nothing is written. It checks that:
 
-- DICOM filenames follow the expected pattern and file ids are unique
+- DICOM filenames follow the expected pattern, the view is one of `CC`, `MLO` or `FB`, and file ids are unique
 - every DICOM image has a row in `INbreast.csv` and every row has an image
 - every annotation file belongs to an image
 - laterality and view in the filename agree with `INbreast.csv`

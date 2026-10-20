@@ -27,6 +27,7 @@ from mammo_seg.data.schema import (
     ImageRecord,
     Manifest,
     Roi,
+    View,
     image_to_json,
     manifest_from_json,
 )
@@ -57,7 +58,7 @@ _FILENAME = re.compile(
 )
 _CSV_COLUMNS = ["File Name", "Laterality", "View", "Acquisition date", "ACR", "Bi-Rads"]
 # The filenames spell the mediolateral oblique view ML, the CSV and the manifest MLO.
-_FILENAME_VIEWS = {"ML": "MLO"}
+_FILENAME_VIEWS = {"ML": View.MLO}
 
 
 class ManifestError(ValueError):
@@ -72,7 +73,7 @@ class _Dicom(NamedTuple):
     file_id: str
     patient_id: str
     laterality: Literal["L", "R"]
-    view: str
+    view: View
     dicom_path: str
 
 
@@ -91,14 +92,20 @@ def _list_dicoms(dataset_dir: Path, problems: list[str]) -> dict[str, _Dicom]:
         if match is None:
             problems.append(f"unexpected DICOM filename: {path.name}")
             continue
-        view = match["view"]
+        try:
+            view = _FILENAME_VIEWS.get(match["view"]) or View(match["view"])
+        except ValueError:
+            problems.append(
+                f"unexpected view {match['view']!r} in DICOM filename: {path.name}"
+            )
+            continue
         laterality: Literal["L", "R"] = "L" if match["laterality"] == "L" else "R"
         dicoms.append(
             _Dicom(
                 file_id=match["file_id"],
                 patient_id=match["patient_id"],
                 laterality=laterality,
-                view=_FILENAME_VIEWS.get(view, view),
+                view=view,
                 dicom_path=path.relative_to(dataset_dir).as_posix(),
             )
         )
@@ -241,6 +248,7 @@ def images_frame(manifest: Manifest) -> pd.DataFrame:
         ],
         columns=pd.Index(IMAGE_COLUMNS),
     )
+    frame["view"] = frame["view"].map(lambda view: view.value)
     frame["acr"] = frame["acr"].astype("Int64")
     return frame
 

@@ -36,6 +36,14 @@ Point = tuple[float, float]
 _CONFIG = ConfigDict(strict=True, extra="forbid")
 
 
+class View(StrEnum):
+    """The mammographic views present in the dataset."""
+
+    CC = "CC"  # craniocaudal
+    MLO = "MLO"  # mediolateral oblique
+    FB = "FB"  # one right-breast image; the meaning of this code is not documented
+
+
 class LesionType(StrEnum):
     """The closed set of lesion types an ROI can have."""
 
@@ -77,7 +85,7 @@ class ImageRecord:
     file_id: str
     patient_id: str
     laterality: Literal["L", "R"]
-    view: str  # CC, MLO or FB
+    view: View
     dicom_path: str  # relative to the dataset folder
     rows: int
     cols: int
