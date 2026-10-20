@@ -196,6 +196,84 @@ It reads `data/processed/manifest.json` and writes `data/processed/masks/<file_i
 - Masks are stored, not generated on the fly, so they are easy to inspect and the dataset class only has to read them.
 - Like the manifest and the splits, the masks are not committed.
 
+## 4. Preprocessing
+
+**Goal:** turn a raw 16-bit DICOM into the input of the model, in one chain that training and inference both use: read the DICOM, crop to the breast, rescale so the longer side is 1024 px, flip right breasts, normalize the intensities. Code: `src/mammo_seg/data/preprocessing.py` (the chain) and `src/mammo_seg/data/preprocess_dataset.py` (the cache on disk and the command).
+
+```bash
+uv run python -m mammo_seg.data.preprocess_dataset            # about 3.5 minutes
+uv run python -m mammo_seg.data.preprocess_dataset --size 768  # another size
+```
+
+### The chain
+
+| Step | Function | What it does |
+|---|---|---|
+| Read | `read_pixels(path)` | The DICOM as a `uint16` array. Only what the dataset contains is accepted (one channel, unsigned up to 16 bits, `MONOCHROME2`, no rescale slope or intercept); anything else raises an error instead of being guessed |
+| Crop | `breast_bbox(pixels)` | The box around the breast, found on the raw image |
+| Rescale | `preprocess(...)` | The crop is resized so its longer side is `size` (1024), by averaging the source pixels |
+| Flip | `preprocess(...)` | Right breasts are flipped horizontally, so the chest wall is on the left in every image |
+| Normalize | `normalize_intensity(pixels)` | Scales to 0..1. Not stored: it runs when an image is loaded and at inference |
+
+`preprocess(pixels, laterality, settings)` runs crop, rescale and flip and returns the image together with a `PreprocessParams` record (the crop box, the size of the result and whether it was flipped). `preprocess_mask(mask, params)` applies the same geometry to a mask, and `restore_mask(mask, params)` maps a predicted mask back onto the original image. At inference a DICOM goes through `read_pixels`, `preprocess` and `normalize_intensity`, exactly like the stored training images.
+
+### The breast box
+
+The breast is the largest connected region of pixels brighter than 100 (the background is close to 0, tissue is far above it). The mask is made on every 8th pixel, opened once to cut off thin bright strips along the image border that touch the breast, and the box around the largest region gets a margin of 2% of its size on each side. Without the opening, such a strip made the box run to the image edge in some images. The box is accurate to about 8 px, far less than the margin.
+
+On the real data the box covers a median of 46% of the image (16% to 76%). All 410 boxes were checked on contact sheets (`notebooks/03_preprocessing_review.ipynb`): each encloses the whole breast, tightly, and keeps the pectoral muscle in MLO views. All 107 masses are inside the box; without the margin one mass at the image's left edge would stick out by 2 px, which is what the margin is for.
+
+### Settings
+
+`PreprocessingSettings` holds everything that decides what the preprocessing does. It is stored with the data in `preprocessing.json`, and a trained model must record the same settings; `check_settings(record, expected)` refuses data preprocessed with other settings.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `threshold` | 100 | Pixels above this value count as breast |
+| `margin` | 0.02 | Margin added around the box, as a fraction of its size |
+| `downscale` | 8 | The breast mask is made on every 8th pixel |
+| `opening` | 1 | Number of morphological openings of that mask |
+| `size` | 1024 | Length of the longer side after rescaling |
+| `max_intensity` | 4095 | Divisor of the normalization (the 12-bit range) |
+| `percentile` | none | If set, per-image normalization by this percentile of the tissue instead of `max_intensity` |
+
+### Intensity normalization
+
+The default is a fixed divisor of 4095 (clipped at 1): the images come from one scanner with a 12-bit range, and this keeps absolute intensities. I first planned per-image scaling by the 99.5th percentile of the tissue, but on 80 random images it made the tissue brightness vary more across images (coefficient of variation 6.2%, against 3.6% for the fixed divisor), because the brightest pixels are outliers such as calcifications and bright masses, so the scale would depend on the lesions that are to be segmented. Per-image scaling stays available through `percentile` for data from other scanners.
+
+### Stored format
+
+Written to `data/processed/preprocessed/`:
+
+- `images/<file_id>.png`: the preprocessed image, 16-bit (values unchanged apart from the averaging of the rescale)
+- `masks/<file_id>.png`: its mass mask, 8-bit with the values 0 and 255 (read it with `read_mask`)
+- `preprocessing.json`: the settings and, for every image, `PreprocessParams` (source shape, crop box, result shape, flip)
+
+All 410 images are processed, including the excluded `FB` view, which is only left out of the splits. The 410 images and masks take 168 MB.
+
+### Validation
+
+`preprocess_dataset` raises `PreprocessingError` listing every image that fails; those images are not written and neither is `preprocessing.json`. It checks that:
+
+- the DICOM can be read and has the size the manifest says
+- the crop box does not cut the mask (a lesion outside the box is an error)
+- the mask is binary and has the shape of the image
+- a mask does not vanish when rescaled, and its area after rescaling is within 5% of the expected one plus half a pixel along its edge
+
+### On the real data
+
+- 410 images with a longer side of 1024 and a shorter side of 276 to 784. The breast fills a median of 71% of the preprocessed image (54% to 85%).
+- Chest wall on the left in all 410 images (201 right breasts flipped).
+- 107 non-empty masks. The rescaled mask has 0.995 to 1.012 times the expected area, none vanishes, and a mask mapped back onto the original image overlaps the original mask with an IoU of at least 0.95 (median 0.99).
+- All 107 masks are brighter than the ring of tissue around them.
+
+### Decisions
+
+- Offline preprocessing is a cache, not a design decision: training reads the stored files to avoid decoding DICOMs every epoch, and the same functions run on the fly at inference.
+- Geometry is stored, intensity scaling is applied at load time, so it can change without regenerating the files.
+- Augmentation (random, so never cached) and padding to a common size belong to the PyTorch dataset.
+- The preprocessed data is not committed, like the other derived data.
+
 ## 5. PyTorch dataset and loaders
 
 **Goal:** everything between the stored preprocessed data and the model: batches of image and mask tensors for training and evaluation, and the padding of a single image for inference. Code in `src/mammo_seg/`: `device.py`, and in `data/`: `dataset.py`, `folds.py`, `augmentation.py`, `loaders.py`.
