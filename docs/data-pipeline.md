@@ -288,9 +288,13 @@ from mammo_seg.data.manifest import read_manifest
 from mammo_seg.data.splits import read_splits
 
 manifest = read_manifest(Path("data/processed/manifest.json"))
-ids = fold_ids(manifest, read_splits(Path("data/processed/splits.json")), validation_fold=0)
+ids = fold_ids(
+    manifest, read_splits(Path("data/processed/splits.json")), validation_fold=0
+)
 data = Path("data/processed/preprocessed")
-train = training_loader(MammogramDataset(data, ids.train, transform=Augmentation()), manifest, batch_size=8)
+train = training_loader(
+    MammogramDataset(data, ids.train, transform=Augmentation()), manifest, batch_size=8
+)
 validation = evaluation_loader(MammogramDataset(data, ids.validation), batch_size=8)
 ```
 

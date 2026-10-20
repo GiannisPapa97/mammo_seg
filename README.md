@@ -4,7 +4,7 @@ A reproducible PyTorch framework for segmentation of mammography images, startin
 
 > **Research use only.** This project is not a medical device and its output must not be used for clinical decisions.
 
-**Status:** early development. The data pipeline has a validated manifest of the INbreast dataset, patient-level splits, mass masks and the preprocessing; the PyTorch dataset, models and training are not implemented yet.
+**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset, patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. Models and training are not implemented yet.
 
 ## Development
 
@@ -65,7 +65,7 @@ Then preprocess the images once (crop to the breast, rescale to a longer side of
 uv run python -m mammo_seg.data.preprocess_dataset
 ```
 
-See [docs/data-pipeline.md](docs/data-pipeline.md) for the formats and checks.
+The PyTorch dataset and loaders read these files; see [docs/data-pipeline.md](docs/data-pipeline.md) for the formats, the checks and how to load a fold.
 
 ## License
 
