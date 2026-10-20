@@ -29,6 +29,7 @@ DEFAULT_MARGIN = 0.02  # of the breast box size, added on every side
 DEFAULT_DOWNSCALE = 8  # the breast mask is made on every 8th pixel
 DEFAULT_OPENING = 1  # removes bright strips thinner than about 3 mask pixels
 DEFAULT_SIZE = 1024  # length of the longer side after rescaling
+DEFAULT_MAX_INTENSITY = 4095  # the 12-bit range of the INbreast images
 
 # Right breasts are flipped so the chest wall is always on the left, where it
 # already is in the left breasts.
@@ -138,6 +139,9 @@ class PreprocessingSettings:
     downscale: Annotated[int, Field(ge=1)] = DEFAULT_DOWNSCALE
     opening: Annotated[int, Field(ge=0)] = DEFAULT_OPENING
     size: Annotated[int, Field(ge=1)] = DEFAULT_SIZE
+    max_intensity: Annotated[int, Field(ge=1)] = DEFAULT_MAX_INTENSITY
+    # Per-image scaling by this percentile of the tissue instead of max_intensity.
+    percentile: Annotated[float, Field(gt=0, le=100)] | None = None
 
 
 @dataclass(frozen=True, config=_CONFIG)
@@ -278,3 +282,41 @@ def restore_mask(mask: Mask, params: PreprocessParams) -> Mask:
     restored = np.zeros(params.source_shape, dtype=np.uint8)
     restored[box.top : box.bottom, box.left : box.right] = scaled >= 0.5
     return restored
+
+
+def normalize_intensity(
+    pixels: npt.NDArray[np.number[Any]],
+    settings: PreprocessingSettings = PreprocessingSettings(),  # noqa: B008
+) -> npt.NDArray[np.float32]:
+    """Scale an image to 0..1 and clip at 1.
+
+    By default every pixel is divided by ``settings.max_intensity`` (4095, the
+    12-bit range of the INbreast images), which keeps absolute intensities. On the
+    dataset this gives tissue of more similar brightness across images than scaling
+    each image by its own bright percentile, because the brightest pixels are
+    outliers such as calcifications and bright masses.
+
+    With ``settings.percentile`` set, each image is instead divided by that
+    percentile of its own tissue (the pixels above ``settings.threshold``), for
+    data from other scanners. Nothing is learned from other images either way, so
+    this is the same for training and inference and cannot leak between splits.
+
+    This runs when an image is loaded, after ``preprocess``, and is not applied to
+    the stored preprocessed images.
+
+    Raises ValueError for an image that is not 2-D, or, in percentile mode, has no
+    pixel above the threshold.
+    """
+    if pixels.ndim != 2:
+        raise ValueError(f"expected a 2-D image, got {pixels.ndim} dimensions")
+    if settings.percentile is None:
+        high = float(settings.max_intensity)
+    else:
+        tissue = pixels[pixels > settings.threshold]
+        if tissue.size == 0:
+            raise ValueError(f"no tissue found: no pixel is above {settings.threshold}")
+        high = float(np.percentile(tissue, settings.percentile))
+    scaled: npt.NDArray[np.float32] = np.clip(
+        pixels.astype(np.float32) / high, 0.0, 1.0
+    )
+    return scaled

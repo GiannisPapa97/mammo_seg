@@ -8,11 +8,13 @@ from tests.data.synthetic import write_dicom_pixels
 
 from mammo_seg.data.preprocessing import (
     DEFAULT_MARGIN,
+    DEFAULT_MAX_INTENSITY,
     DEFAULT_SIZE,
     BoundingBox,
     PreprocessingSettings,
     PreprocessParams,
     breast_bbox,
+    normalize_intensity,
     preprocess,
     preprocess_mask,
     read_pixels,
@@ -348,6 +350,8 @@ def test_the_default_settings_are_the_documented_ones() -> None:
     assert (settings.threshold, settings.downscale, settings.opening) == (100, 8, 1)
     assert settings.margin == DEFAULT_MARGIN
     assert settings.size == DEFAULT_SIZE == 1024
+    assert settings.max_intensity == DEFAULT_MAX_INTENSITY == 4095
+    assert settings.percentile is None
 
 
 @pytest.mark.parametrize(
@@ -358,6 +362,9 @@ def test_the_default_settings_are_the_documented_ones() -> None:
         {"downscale": 0},
         {"opening": -1},
         {"size": 0},
+        {"max_intensity": 0},
+        {"percentile": 0},
+        {"percentile": 100.5},
     ],
 )
 def test_invalid_settings_are_rejected(changes: dict[str, float]) -> None:
@@ -520,3 +527,162 @@ def test_a_signed_dicom_is_rejected(tmp_path: Path) -> None:
     write_dicom_pixels(tmp_path / "a.dcm", np.ones((3, 4), dtype=np.int16))
     with pytest.raises(ValueError, match="unsigned image"):
         read_pixels(tmp_path / "a.dcm")
+
+
+# --- intensity normalization ---
+
+# Per-image scaling by the 99.5th percentile of the tissue (an option, not the default).
+PER_IMAGE = PreprocessingSettings(percentile=99.5)
+
+
+def test_by_default_pixels_are_divided_by_the_12_bit_maximum() -> None:
+    pixels = np.array([[0, 100, 2047, 4095, 4096, 65535]], dtype=np.uint16)
+    result = normalize_intensity(pixels)
+    assert result.dtype == np.float32
+    assert result[0, :4] == pytest.approx([0.0, 100 / 4095, 2047 / 4095, 1.0])
+    assert (result[0, 4:] == 1.0).all()
+
+
+def test_the_default_scaling_does_not_depend_on_the_rest_of_the_image() -> None:
+    pixels = ramp_image()
+    padded = np.pad(pixels, ((300, 300), (300, 300)))
+    brighter = pixels.copy()
+    brighter[0, 0] = 60000
+    assert np.array_equal(
+        normalize_intensity(padded)[300:500, 300:500], normalize_intensity(pixels)
+    )
+    assert np.array_equal(
+        normalize_intensity(brighter)[1:, 1:], normalize_intensity(pixels)[1:, 1:]
+    )
+
+
+def test_a_different_maximum_changes_the_scale() -> None:
+    pixels = np.array([[1000, 2000]], dtype=np.uint16)
+    result = normalize_intensity(pixels, PreprocessingSettings(max_intensity=2000))
+    assert result[0] == pytest.approx([0.5, 1.0])
+
+
+def test_the_default_scaling_accepts_an_image_without_tissue() -> None:
+    assert (normalize_intensity(np.zeros((4, 4), dtype=np.uint16)) == 0).all()
+
+
+def ramp_image() -> np.ndarray:
+    """A black background around a 100 x 100 block of 10000 distinct tissue values."""
+    pixels = np.zeros((200, 200), dtype=np.uint16)
+    pixels[50:150, 50:150] = np.arange(200, 10200, dtype=np.uint16).reshape(100, 100)
+    return pixels
+
+
+def test_the_result_is_a_float32_image_between_0_and_1() -> None:
+    result = normalize_intensity(ramp_image())
+    assert result.dtype == np.float32
+    assert result.shape == (200, 200)
+    assert result.min() >= 0.0 and result.max() == 1.0
+
+
+def test_the_background_stays_at_zero() -> None:
+    result = normalize_intensity(ramp_image())
+    assert (result[:50] == 0).all()
+    assert (result[:, :50] == 0).all()
+
+
+def test_the_tissue_percentile_maps_to_one_and_brighter_pixels_are_cut_off() -> None:
+    pixels = ramp_image()
+    result = normalize_intensity(pixels, PER_IMAGE)
+    tissue = result[pixels > 100]
+    assert (tissue == 1.0).mean() == pytest.approx(0.005, abs=0.0005)
+    high = np.percentile(pixels[pixels > 100], 99.5)
+    assert result[pixels == 5000][0] == pytest.approx(5000 / high)
+
+
+def test_brighter_means_higher_and_the_order_is_kept() -> None:
+    pixels = ramp_image()
+    result = normalize_intensity(pixels, PER_IMAGE)
+    tissue = np.sort(pixels[pixels > 100])
+    values = normalize_intensity(tissue.reshape(1, -1), PER_IMAGE)[0]
+    assert (np.diff(values) >= 0).all()
+    assert result[60, 60] < result[100, 100] < result[140, 140]
+
+
+def test_images_of_different_brightness_get_the_same_result() -> None:
+    pixels = ramp_image()
+    dimmer = (pixels // 2).astype(np.uint16)
+    dimmer_tissue = dimmer > 100
+    a = normalize_intensity(pixels, PER_IMAGE)
+    b = normalize_intensity(dimmer, PER_IMAGE)
+    assert np.abs(a[dimmer_tissue] - b[dimmer_tissue]).max() < 0.01
+
+
+def test_more_background_does_not_change_the_result() -> None:
+    pixels = ramp_image()
+    padded = np.pad(pixels, ((300, 300), (300, 300)))
+    assert np.array_equal(
+        normalize_intensity(padded, PER_IMAGE)[300:500, 300:500],
+        normalize_intensity(pixels, PER_IMAGE),
+    )
+
+
+def test_a_higher_percentile_scales_by_a_higher_value() -> None:
+    pixels = ramp_image()
+    p100 = normalize_intensity(pixels, PreprocessingSettings(percentile=100.0))
+    p50 = normalize_intensity(pixels, PreprocessingSettings(percentile=50.0))
+    assert p100.max() == 1.0 and (p100[pixels > 100] == 1.0).mean() < 0.001
+    assert (p50 > p100).sum() > 0
+    assert p50.max() == 1.0 and (p50[pixels > 100] == 1.0).mean() > 0.4
+
+
+def test_the_threshold_decides_what_counts_as_tissue_in_percentile_mode() -> None:
+    pixels = ramp_image()
+    pixels[0:20, 0:20] = 60  # dim background noise
+    low = normalize_intensity(
+        pixels, PreprocessingSettings(percentile=99.5, threshold=10)
+    )
+    high = normalize_intensity(
+        pixels, PreprocessingSettings(percentile=99.5, threshold=100)
+    )
+    assert not np.array_equal(low, high)
+
+
+def test_the_threshold_does_not_matter_in_the_default_mode() -> None:
+    pixels = ramp_image()
+    pixels[0:20, 0:20] = 60
+    low = normalize_intensity(pixels, PreprocessingSettings(threshold=10))
+    high = normalize_intensity(pixels, PreprocessingSettings(threshold=100))
+    assert np.array_equal(low, high)
+
+
+def test_normalizing_is_deterministic_and_leaves_the_input_alone() -> None:
+    pixels = ramp_image()
+    before = pixels.copy()
+    assert np.array_equal(
+        normalize_intensity(pixels, PER_IMAGE), normalize_intensity(pixels, PER_IMAGE)
+    )
+    assert np.array_equal(pixels, before)
+
+
+def test_a_full_range_16_bit_image_does_not_overflow() -> None:
+    pixels = np.full((50, 50), 65535, dtype=np.uint16)
+    assert (normalize_intensity(pixels, PER_IMAGE) == 1.0).all()
+
+
+def test_an_image_without_tissue_is_rejected() -> None:
+    with pytest.raises(ValueError, match="no tissue found"):
+        normalize_intensity(np.full((10, 10), 100, dtype=np.uint16), PER_IMAGE)
+    with pytest.raises(ValueError, match="no tissue found"):
+        normalize_intensity(np.zeros((10, 10), dtype=np.uint16), PER_IMAGE)
+
+
+def test_a_non_2d_image_is_rejected_by_the_normalization() -> None:
+    with pytest.raises(ValueError, match="expected a 2-D image, got 3 dimensions"):
+        normalize_intensity(np.ones((4, 4, 3), dtype=np.uint16) * 500)
+
+
+def test_preprocessing_then_normalizing_gives_the_model_input() -> None:
+    pixels, _ = lesion_image_and_mask()
+    image, _ = preprocess(
+        pixels, "R", PreprocessingSettings(margin=0.0, downscale=1, opening=0, size=100)
+    )
+    result = normalize_intensity(image, PER_IMAGE)
+    assert result.shape == image.shape
+    assert result.dtype == np.float32
+    assert 0.0 <= result.min() and result.max() == 1.0
