@@ -23,12 +23,17 @@ The Kaggle page lists the license as "Unknown" and has no description. The origi
 
 - 410 images, **108 patients** (the publication speaks of 115 cases). 99 patients have one exam and 9 have two (distinct acquisition dates).
 - The filename is `<file id>_<patient id>_MG_<laterality>_<view>_ANON`. The patient id is the grouping key for splits (confirmed by `README.txt`). `INbreast.csv` has the patient id removed and links by file id only. Its file ids, laterality and view match the DICOM filenames for all 410 images.
-- Views: 203 CC, 206 MLO (`ML` in the filenames) and one right-breast image with view `FB`. Left/right is balanced (209 / 201).
+- Views: 203 CC, 206 MLO and one right-breast image with view `FB`. Left/right is balanced (209 / 201). See [Views](#views) below.
 - Two sizes: 3328 x 2560 (243 images) and 4084 x 3328 (167 images). Both occur in every acquisition period.
 - DICOM headers: 16-bit unsigned, `MONOCHROME2` (higher value = brighter, no inversion needed), uncompressed, modality `OT`. There is **no `PixelSpacing`** in the headers; if physical size is needed it has to come from the publication.
 - Actual intensities use 12 bits: the maximum value is at most 4095 in every image, although 16 bits are stored.
 - Orientation follows laterality: left-breast images have the chest wall on the left, right-breast images on the right (checked on all 410). Flip one side to a common orientation before training.
 - BI-RADS (per image): 1: 67, 2: 220, 3: 23, 4a: 13, 4b: 8, 4c: 22, 5: 49, 6: 8.
+
+### Views
+
+- **`ML` is taken to be MLO.** The filenames write `ML` and `INbreast.csv` writes `MLO` for the same 206 images. The paper lists only CC and MLO views, and the DICOM headers carry no view information (no `ViewPosition`, positioner angles or `PatientOrientation` values) to confirm it. A true lateral view (90 degrees) would be a different view, but nothing in the dataset describes one. The manifest build checks that the filename and the CSV agree.
+- **`FB` is its own view and is kept in the manifest, but excluded from training and evaluation.** `FB` means "from below" (caudocranial), a reversed CC taken for patients where the standard CC is hard to position. Only one image has it (`50994300`, a right breast, 2009-01 exam). The same breast has two CC images and an MLO in that exam with an annotated mass (BI-RADS 4a, a 12 mm nodule according to the report), but the `FB` image has no mass annotation, only one calcification point, and its framing differs (less of the breast in view). Treating it as a CC with a "no mass" label could create a false negative, so it is not used. The meaning of `FB` comes from the clinical description, not from the dataset documentation.
 
 ### Breast bounding box
 
@@ -129,5 +134,4 @@ Patients (108):
 
 - Is the Kaggle copy identical to the original release (108 patients here against 115 cases in the publication)?
 - Pixel spacing and bit depth: confirm against `inbreast.pdf`.
-- What does the `FB` view code mean, and should that one image (negative) be kept?
 - Does the breast bounding box (threshold 100) hold up on a visual check of all images?

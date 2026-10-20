@@ -41,7 +41,7 @@ class View(StrEnum):
 
     CC = "CC"  # craniocaudal
     MLO = "MLO"  # mediolateral oblique
-    FB = "FB"  # one right-breast image; the meaning of this code is not documented
+    FB = "FB"  # from below (caudocranial), a reversed CC; one right-breast image
 
 
 class LesionType(StrEnum):
