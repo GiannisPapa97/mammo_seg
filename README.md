@@ -10,8 +10,19 @@ A reproducible PyTorch framework for segmentation of mammography images, startin
 
 Requires [uv](https://docs.astral.sh/uv/). Python 3.11 or newer is supported; development uses 3.12.
 
+PyTorch is installed through an extra that picks its build. Choose exactly one:
+
 ```bash
-uv sync
+uv sync --extra cpu      # local development and CI (no GPU)
+uv sync --extra cu126    # a GPU machine with an older NVIDIA driver (CUDA 12.6)
+uv sync --extra cu130    # a GPU machine with a recent NVIDIA driver (CUDA 13.0)
+```
+
+A plain `uv sync` installs no PyTorch and removes it if it was installed. On Kaggle or Colab, where a GPU build of PyTorch is already installed, install the package with `pip install .` (no extra) and the existing PyTorch is used. The device is chosen at run time: `auto` (default) picks a GPU if there is one, and the `MAMMO_SEG_DEVICE` environment variable (`cpu`, `cuda`, `cuda:1`, `mps`) overrides it.
+
+The checks:
+
+```bash
 uv run ruff check
 uv run ruff format --check
 uv run mypy
