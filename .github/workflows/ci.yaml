@@ -29,6 +29,11 @@ jobs:
       - name: Ruff format
         run: uv run ruff format --check
 
+      # Notebook outputs can contain images from the dataset, so committed
+      # notebooks must have them stripped (see AGENTS.md).
+      - name: Notebook outputs
+        run: git ls-files -z '*.ipynb' | xargs -0 --no-run-if-empty uv run nbstripout --verify
+
   typecheck:
     runs-on: ubuntu-latest
     steps:
