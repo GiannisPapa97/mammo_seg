@@ -16,10 +16,11 @@ import sys
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import pandas as pd
 import pydicom
+from pydantic import ValidationError
 
 from mammo_seg.data.annotations import read_rois
 from mammo_seg.data.schema import (
@@ -165,6 +166,14 @@ def _read_size(dataset_dir: Path, dicom_path: str) -> tuple[int, int]:
     return int(header.Rows), int(header.Columns)
 
 
+def _describe(error: ValidationError) -> str:
+    """The invalid fields of a validation error as one line."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+        for item in error.errors()
+    )
+
+
 def build_manifest(dataset_dir: Path) -> Manifest:
     """Build the manifest of the INbreast release in ``dataset_dir``.
 
@@ -201,22 +210,26 @@ def build_manifest(dataset_dir: Path) -> Manifest:
     for file_id in sorted(dicoms):
         dicom, row = dicoms[file_id], metadata[file_id]
         rows, cols = _read_size(dataset_dir, dicom.dicom_path)
-        images.append(
-            ImageRecord(
-                file_id=file_id,
-                patient_id=dicom.patient_id,
-                laterality=dicom.laterality,
-                view=dicom.view,
-                dicom_path=dicom.dicom_path,
-                rows=rows,
-                cols=cols,
-                acquisition_date=row.acquisition_date,
-                acr=row.acr,
-                birads=row.birads,
-                has_annotation=file_id in annotations,
-                rois=annotations.get(file_id, ()),
-            )
-        )
+        fields: dict[str, Any] = {
+            "file_id": file_id,
+            "patient_id": dicom.patient_id,
+            "laterality": dicom.laterality,
+            "view": dicom.view,
+            "dicom_path": dicom.dicom_path,
+            "rows": rows,
+            "cols": cols,
+            "acquisition_date": row.acquisition_date,
+            "acr": row.acr,
+            "birads": row.birads,
+            "has_annotation": file_id in annotations,
+            "rois": annotations.get(file_id, ()),
+        }
+        try:
+            images.append(ImageRecord(**fields))
+        except ValidationError as error:
+            problems.append(f"image {file_id}: {_describe(error)}")
+    if problems:
+        raise ManifestError(problems)
     return Manifest(version=SCHEMA_VERSION, images=tuple(images))
 
 

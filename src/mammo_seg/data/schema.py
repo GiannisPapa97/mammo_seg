@@ -14,7 +14,8 @@ annotated lesion (ROI) with a type and a polygon. It is stored as JSON::
     ]}
 
 The classes are frozen pydantic dataclasses in strict mode: an object cannot be
-built, or a file read, with a wrong type or an unknown field value. Pydantic
+built, or a file read, with a wrong type, an out-of-range value or an unknown
+field value. Pydantic
 raises ``pydantic.ValidationError`` (a ``ValueError``) saying which value is
 wrong.
 
@@ -24,14 +25,24 @@ the ROIs (such as the number of masses) are computed, not stored.
 
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
-from pydantic import ConfigDict, TypeAdapter
+from pydantic import ConfigDict, Field, FiniteFloat, StringConstraints, TypeAdapter
 from pydantic.dataclasses import dataclass
 
 SCHEMA_VERSION: Final = 1
 
-Point = tuple[float, float]
+Point = tuple[FiniteFloat, FiniteFloat]
+
+# Constraints on the image fields. The patterns and values match the dataset:
+# 8-digit file ids, 16-character hex patient ids, year-and-semester dates.
+FileId = Annotated[str, StringConstraints(pattern=r"^\d+$")]
+PatientId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]+$")]
+RelativePath = Annotated[str, StringConstraints(min_length=1)]
+Pixels = Annotated[int, Field(gt=0)]
+AcquisitionDate = Annotated[str, StringConstraints(pattern=r"^\d{6}$")]
+Density = Annotated[int, Field(ge=1, le=4)]  # ACR breast density category
+BiRads = Literal["1", "2", "3", "4a", "4b", "4c", "5", "6"]
 
 _CONFIG = ConfigDict(strict=True, extra="forbid")
 
@@ -82,16 +93,16 @@ class Roi:
 class ImageRecord:
     """One mammogram: its metadata and all its annotated lesions."""
 
-    file_id: str
-    patient_id: str
+    file_id: FileId
+    patient_id: PatientId
     laterality: Literal["L", "R"]
     view: View
-    dicom_path: str  # relative to the dataset folder
-    rows: int
-    cols: int
-    acquisition_date: str  # year and semester, e.g. "200902"
-    acr: int | None  # breast density 1 to 4; missing for one image
-    birads: str  # e.g. "4a"
+    dicom_path: RelativePath  # relative to the dataset folder
+    rows: Pixels
+    cols: Pixels
+    acquisition_date: AcquisitionDate  # year and semester, e.g. "200902"
+    acr: Density | None  # missing for one image
+    birads: BiRads
     has_annotation: bool  # an annotation file exists for the image
     rois: tuple[Roi, ...]
 

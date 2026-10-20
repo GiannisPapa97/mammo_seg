@@ -219,6 +219,40 @@ def test_invalid_acr_is_an_error(dataset_dir: Path) -> None:
         build_manifest(dataset_dir)
 
 
+def test_acr_out_of_range_is_an_error(dataset_dir: Path) -> None:
+    csv = dataset_dir / "INbreast.csv"
+    csv.write_text(
+        csv.read_text().replace("200902;11111111;2;4a", "200902;11111111;7;4a")
+    )
+    with pytest.raises(
+        ManifestError, match="image 11111111: acr: .*less than or equal"
+    ):
+        build_manifest(dataset_dir)
+
+
+def test_birads_outside_the_known_values_is_an_error(dataset_dir: Path) -> None:
+    csv = dataset_dir / "INbreast.csv"
+    csv.write_text(
+        csv.read_text().replace("200902;11111111;2;4a", "200902;11111111;2;9")
+    )
+    with pytest.raises(ManifestError, match="image 11111111: birads"):
+        build_manifest(dataset_dir)
+
+
+def test_every_invalid_image_is_reported(dataset_dir: Path) -> None:
+    csv = dataset_dir / "INbreast.csv"
+    csv.write_text(
+        csv.read_text()
+        .replace("L;CC;200902;11111111", "L;CC;2009;11111111")
+        .replace("201001;22222221;1;2", "201001;22222221;1;8")
+    )
+    with pytest.raises(ManifestError) as error:
+        build_manifest(dataset_dir)
+    assert len(error.value.problems) == 2
+    assert "image 11111111: acquisition_date" in error.value.problems[0]
+    assert "image 22222221: birads" in error.value.problems[1]
+
+
 def test_malformed_annotation_is_an_error(dataset_dir: Path) -> None:
     write_annotation(dataset_dir / "AllXML" / "22222222.xml", [("Mass", ["(1, 2, 3)"])])
     with pytest.raises(ManifestError, match="expected a point"):

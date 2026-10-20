@@ -38,15 +38,15 @@ Image fields:
 
 | Field | Source | Meaning |
 |---|---|---|
-| `file_id` | DICOM filename | Image id, a string |
-| `patient_id` | DICOM filename | Anonymized patient id; the grouping key for splits |
+| `file_id` | DICOM filename | Image id: a string of digits |
+| `patient_id` | DICOM filename | Anonymized patient id (lowercase hex); the grouping key for splits |
 | `laterality` | DICOM filename | `L` or `R` |
 | `view` | DICOM filename | One of `CC`, `MLO` or `FB`; the filenames write `ML` for `MLO`. Any other value is an error |
 | `dicom_path` | DICOM filename | Path of the image relative to the dataset folder |
-| `rows`, `cols` | DICOM header | Image size in pixels |
-| `acquisition_date` | `INbreast.csv` | Year and semester, e.g. `200902` |
-| `acr` | `INbreast.csv` | Breast density 1 to 4; `null` for one image |
-| `birads` | `INbreast.csv` | BI-RADS category, e.g. `4a` |
+| `rows`, `cols` | DICOM header | Image size in pixels, greater than 0 |
+| `acquisition_date` | `INbreast.csv` | Year and semester as six digits, e.g. `200902` |
+| `acr` | `INbreast.csv` | Breast density 1 to 4; `null` for one image (any other value is an error) |
+| `birads` | `INbreast.csv` | BI-RADS category: one of `1`, `2`, `3`, `4a`, `4b`, `4c`, `5`, `6` |
 | `has_annotation` | XML files | An annotation file exists for the image (false for the normal images) |
 | `rois` | XML files | The lesions of the image; empty when there is no annotation |
 
@@ -55,7 +55,7 @@ ROI fields:
 | Field | Meaning |
 |---|---|
 | `lesion_type` | One of `mass`, `calcification`, `cluster`, `spiculated_region`, `distortion`, `asymmetry`, `unknown` |
-| `points` | Polygon outline in pixels, `[x, y]` = `[column, row]`; a single point for most calcifications |
+| `points` | Polygon outline in pixels, `[x, y]` = `[column, row]`, finite numbers (no NaN or infinity); a single point for most calcifications |
 
 The lesion type is a closed set. Raw names are mapped to it, merging misspellings (`Assymetry`, `Espiculated Region`, ...). Regions with no usable name (`Point 1`, `Unnamed`, empty) become `unknown`. A name that is not in the mapping is an error, so new data cannot slip in silently.
 
@@ -77,9 +77,10 @@ For splitting and analysis, `images_frame(manifest)` gives one row per image (in
 - every annotation file belongs to an image
 - laterality and view in the filename agree with `INbreast.csv`
 - `INbreast.csv` has the expected columns, no duplicate file ids and valid ACR values
+- every image record satisfies the schema constraints above (BI-RADS, ACR, date, sizes and so on); violations are reported per image, together with the other problems
 - every annotation file describes one image, its lesion names are known and its points can be read
 
-The schema classes are validated by [pydantic](https://docs.pydantic.dev) in strict mode, so a wrong type, a missing or extra field, an unknown lesion type or another schema version is rejected both when an object is built and when a file is read. `read_manifest` raises `pydantic.ValidationError` (a `ValueError`) that names the offending value.
+The schema classes are validated by [pydantic](https://docs.pydantic.dev) in strict mode, so a wrong type, an out-of-range value (for example a non-positive image size or an ACR outside 1 to 4), a missing or extra field, an unknown lesion type or view, or another schema version is rejected both when an object is built and when a file is read. `read_manifest` raises `pydantic.ValidationError` (a `ValueError`) that names the offending value.
 
 ### On the real data
 

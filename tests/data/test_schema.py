@@ -132,6 +132,69 @@ def test_invalid_laterality_is_rejected() -> None:
         make_image(laterality="X")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("file_id", ""),
+        ("file_id", "12a"),
+        ("patient_id", ""),
+        ("patient_id", "XYZ"),
+        ("patient_id", "ABCDEF"),
+        ("dicom_path", ""),
+        ("rows", 0),
+        ("rows", -5),
+        ("cols", 0),
+        ("cols", -1),
+        ("acquisition_date", ""),
+        ("acquisition_date", "20090"),
+        ("acquisition_date", "2009021"),
+        ("acquisition_date", "20090a"),
+        ("acr", 0),
+        ("acr", 5),
+        ("birads", "0"),
+        ("birads", "7"),
+        ("birads", "4d"),
+        ("birads", ""),
+        ("birads", 4),
+    ],
+)
+def test_out_of_range_image_field_is_rejected(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        make_image(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"rows": 1, "cols": 1},
+        {"acr": 1},
+        {"acr": 4},
+        {"acr": None},
+        {"file_id": "0"},
+        {"patient_id": "0123456789abcdef"},
+        *({"birads": value} for value in ["1", "2", "3", "4a", "4b", "4c", "5", "6"]),
+    ],
+)
+def test_boundary_values_are_accepted(changes: dict[str, Any]) -> None:
+    image = make_image(**changes)
+    for field, value in changes.items():
+        assert getattr(image, field) == value
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_coordinates_are_rejected(value: float) -> None:
+    with pytest.raises(ValidationError):
+        Roi(LesionType.MASS, ((value, 1.0),))
+    with pytest.raises(ValidationError):
+        Roi(LesionType.MASS, ((1.0, value),))
+
+
+def test_non_finite_coordinates_in_a_file_are_rejected() -> None:
+    text = manifest_json(make_image()).replace("[1.0,1.0]", "[NaN,1.0]")
+    with pytest.raises(ValidationError):
+        manifest_from_json(text)
+
+
 def test_unknown_view_in_a_file_is_rejected() -> None:
     text = manifest_json(make_image()).replace('"view":"CC"', '"view":"XX"')
     with pytest.raises(ValidationError, match="view"):
