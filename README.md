@@ -22,6 +22,14 @@ uv run pytest
 
 Datasets are not part of this repository. The `data/` directory is git-ignored; raw data goes in `data/raw/` and derived data in `data/processed/`.
 
+To download and unzip the INbreast dataset (about 2 GB, about 9 GB unzipped) from its [Kaggle copy](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) into `data/raw/`:
+
+```bash
+scripts/download_data.sh
+```
+
+It needs `curl` and `unzip`, resumes an interrupted download, and does nothing if the data is already there. The license of this copy is unclear, so do not redistribute the data. See [docs/dataset.md](docs/dataset.md) for what it contains.
+
 ## License
 
 Code: [MIT](LICENSE). Datasets have their own licenses and terms and are not covered by it.
