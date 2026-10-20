@@ -154,7 +154,49 @@ On the real manifest, 5 folds with a 20% test set give 22 test patients (10 with
 - `splits.json` is not committed, like the manifest.
 - There is no splitter interface for now. If a second strategy is needed, `splitting.py` is where an interface would go.
 
+## 3. Masks
+
+**Goal:** a binary segmentation mask for every image, drawn from the mass polygons of the manifest, because the raw data has no mask images.
+
+```bash
+uv run python -m mammo_seg.data.masks
+```
+
+It reads `data/processed/manifest.json` and writes `data/processed/masks/<file_id>.png` for every image (`--manifest` and `--output-dir` change the paths). It takes about two minutes, mostly for writing the PNG files. Code: `src/mammo_seg/data/masks.py`.
+
+### Format
+
+- One mask per image, at the **native image size** (for example 4084 x 3328), as an 8-bit PNG with the values 0 (background) and 255 (mass). `read_mask(path)` returns a 0/1 array.
+- Images without a mass get an empty mask, so every manifest image has a file. This includes the excluded `FB` image; masks do not depend on the splits.
+- Native size means preprocessing can downscale image and mask the same way and the target size can change without rebuilding the masks. All 410 masks take about 6 MB, because they are mostly zeros.
+
+### How a mask is drawn
+
+- All `mass` polygons of an image are merged into one mask; overlapping masses become one region. The lesion type is an argument of `rasterize`, so another type can be drawn later. ROIs with fewer than 3 points (single-point calcifications) have no area and leave the mask empty.
+- Polygon coordinates are in continuous image space, `(x, y)` = `(column, row)`, with the origin at the top-left corner, so the centre of pixel `(row, column)` is at `(column + 0.5, row + 0.5)`. A pixel is set when its centre is inside the polygon (even-odd rule). This is done with a small scanline routine in NumPy and is tested against an independent brute-force point-in-polygon check.
+- Polygons that leave the image are clipped to it. This affects 3 of the 116 masses, which stick out by a few pixels.
+- The polygons are drawn as annotated. For 12 of the 116 masses, spiky vertices leave isolated specks of 1 to 47 pixels next to the main region (which has 8,000 to 130,000 pixels); they are kept in the mask.
+
+### Validation
+
+`write_masks` checks every mask against its polygons, raises `MaskError` listing all problems, and does not write the masks that have one. It checks that:
+
+- the mask has the image shape and only the values 0 and 1
+- every polygon has at least 3 points and covers at least one pixel of the image
+- for polygons fully inside the image, the number of pixels matches the polygon area (shoelace formula) within 0.5% of the area plus 0.1 pixel per pixel of perimeter. On the real masses the difference is at most 0.4% of the area and 0.05 pixel per pixel of perimeter; a polygon that crosses itself differs far more
+- the mask has at least as many pixels as the largest polygon and at most the sum of all polygons, and no pixels if there are no polygons
+
+### On the real data
+
+410 masks: 107 non-empty (116 masses, 3 clipped to the image) and 303 empty, matching `has_mass` in the manifest. Overlays on a sample of images (including the clipped ones and an image with three masses) line up with the lesions.
+
+### Decisions
+
+- Masses only, as agreed; calcifications and the other lesion types are not drawn.
+- Masks are stored, not generated on the fly, so they are easy to inspect and the dataset class only has to read them.
+- Like the manifest and the splits, the masks are not committed.
+
 ## Next steps
 
-- Mask rasterization from the mass polygons.
-- Preprocessing: orientation, intensity scaling, breast crop and offline downscale.
+- Preprocessing: orientation, intensity scaling, breast crop and offline downscale of images and masks.
+- The PyTorch dataset that reads the images, masks and splits.
