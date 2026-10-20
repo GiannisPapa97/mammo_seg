@@ -4,14 +4,25 @@ A reproducible PyTorch framework for segmentation of mammography images, startin
 
 > **Research use only.** This project is not a medical device and its output must not be used for clinical decisions.
 
-**Status:** early development. The data pipeline has a validated manifest of the INbreast dataset, patient-level splits and mass masks; preprocessing, models and training are not implemented yet.
+**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset, patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. Models and training are not implemented yet.
 
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/). Python 3.11 or newer is supported; development uses 3.12.
 
+PyTorch is installed through an extra that picks its build. Choose exactly one:
+
 ```bash
-uv sync
+uv sync --extra cpu      # local development and CI (no GPU)
+uv sync --extra cu126    # a GPU machine with an older NVIDIA driver (CUDA 12.6)
+uv sync --extra cu130    # a GPU machine with a recent NVIDIA driver (CUDA 13.0)
+```
+
+A plain `uv sync` installs no PyTorch and removes it if it was installed. On Kaggle or Colab, where a GPU build of PyTorch is already installed, install the package with `pip install .` (no extra) and the existing PyTorch is used. The device is chosen at run time: `auto` (default) picks a GPU if there is one, and the `MAMMO_SEG_DEVICE` environment variable (`cpu`, `cuda`, `cuda:1`, `mps`) overrides it.
+
+The checks:
+
+```bash
 uv run ruff check
 uv run ruff format --check
 uv run mypy
@@ -48,7 +59,13 @@ Then write the mass masks (`data/processed/masks/<file_id>.png`, one per image):
 uv run python -m mammo_seg.data.masks
 ```
 
-See [docs/data-pipeline.md](docs/data-pipeline.md) for the formats and checks.
+Then preprocess the images once (crop to the breast, rescale to a longer side of 1024 px, flip right breasts), which writes `data/processed/preprocessed/`:
+
+```bash
+uv run python -m mammo_seg.data.preprocess_dataset
+```
+
+The PyTorch dataset and loaders read these files; see [docs/data-pipeline.md](docs/data-pipeline.md) for the formats, the checks and how to load a fold.
 
 ## License
 

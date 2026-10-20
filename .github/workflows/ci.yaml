@@ -46,7 +46,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra cpu
 
       - name: Mypy
         run: uv run mypy
@@ -63,7 +63,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra cpu
 
       # The coverage minimum is set in pyproject.toml and enforced by pytest.
       - name: Pytest

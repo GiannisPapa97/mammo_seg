@@ -37,7 +37,7 @@ The Kaggle page lists the license as "Unknown" and has no description. The origi
 
 ### Breast bounding box
 
-The breast covers about a third of each image (threshold on intensity above 100; background is close to 0). Its bounding box covers a median of 44% of the image (range 15% to 75%) and is about 3150 x 1470 px at the median. Cropping to the box before resizing keeps more resolution for the same cost. This is a rough threshold estimate over all 410 images; it needs a visual check before use.
+The breast covers about a third of each image (threshold on intensity above 100; background is close to 0). Its bounding box covers a median of 44% of the image (range 15% to 75%) and is about 3150 x 1470 px at the median. Cropping to the box before resizing keeps more resolution for the same cost. This is the rough threshold estimate from the exploration; the box used for preprocessing is described in [data-pipeline.md](data-pipeline.md#4-preprocessing) and was checked visually on all 410 images.
 
 ## Annotations
 
@@ -127,11 +127,10 @@ Patients (108):
    - There is no official split. A fixed held-out test set of about 20% of patients would hold only about 10 positive patients, so metrics from it are very noisy. Report cross-validation results and use a test set only as a sanity check.
 4. **Negatives matter.** Of the 410 images, 303 have no mass. Decide whether to train on positives only or on all images, and report lesion-positive and all-image metrics separately. Also report the 67 normal and the 236 other-lesion negatives separately, since they behave differently.
 5. **Masks must be derived.** Rasterize the polygons (clip to the image, merge multiple masses per image) and validate them. Keep the derived masks under `data/processed/`.
-6. **Preprocessing choices to make:** one orientation for both breasts, intensity scaling from the 12-bit range, cropping to the breast, and the offline downscale (a factor of /2 to /4 of the native image, or a crop resized to about 1024 px).
+6. **Preprocessing:** one orientation for both breasts, cropping to the breast, a downscale to a longer side of 1024 px and intensity scaling from the 12-bit range. These are decided and implemented; see [data-pipeline.md](data-pipeline.md#4-preprocessing).
 7. **Grouping key:** patient id from the filename, never the file id.
 
 ## Open questions
 
 - Is the Kaggle copy identical to the original release (108 patients here against 115 cases in the publication)?
 - Pixel spacing and bit depth: confirm against `inbreast.pdf`.
-- Does the breast bounding box (threshold 100) hold up on a visual check of all images?
