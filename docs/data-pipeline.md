@@ -353,4 +353,4 @@ A model trained on the canvas still works on any image size. `pad_to_multiple(im
 
 ## Next steps
 
-- The model, the loss and the metrics (Dice, IoU, precision, sensitivity on the valid pixels, positive and all images separately), then the training loop with checkpoints.
+- The model and the training loop, which use these loaders; see [training.md](training.md), which also defines the metrics and the loss.
