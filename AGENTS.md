@@ -229,7 +229,7 @@ The user is the sole author of the work. Do not credit or mention coding agents 
 ### 6.1. Data and Splits
 
 - Prevent data leakage between training, validation, and test data.
-- Split by patient, never by image: all views of one patient (left/right, CC/ML) must stay in the same split. Persist the split to a file and test that no patient appears in more than one split.
+- Split by patient, never by image: all views of one patient (left/right, CC/MLO) must stay in the same split. Persist the split to a file and test that no patient appears in more than one split.
 - Fit preprocessing and normalization statistics only on training data.
 - Use fixed, recorded random seeds wherever randomness is involved.
 - Treat `data/raw/` as read-only. Write derived data (converted images, masks, caches) to `data/processed/`. `data/` is git-ignored; never commit datasets, DICOM files, masks, or model artifacts (checkpoints, MLflow runs, Optuna databases) without explicit permission.
