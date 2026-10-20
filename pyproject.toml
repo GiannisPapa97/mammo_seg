@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.14.1",
     "pydicom>=3.0.2",
     "scikit-learn>=1.9.1",
+    "scipy>=1.17.1",
 ]
 
 [dependency-groups]
@@ -67,7 +68,7 @@ files = ["src", "tests"]
 explicit_package_bases = true
 mypy_path = "src"
 
-# scikit-learn ships no type information
+# scikit-learn and SciPy ship no type information
 [[tool.mypy.overrides]]
-module = ["sklearn", "sklearn.*"]
+module = ["sklearn", "sklearn.*", "scipy", "scipy.*"]
 ignore_missing_imports = true
