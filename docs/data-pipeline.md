@@ -196,7 +196,79 @@ It reads `data/processed/manifest.json` and writes `data/processed/masks/<file_i
 - Masks are stored, not generated on the fly, so they are easy to inspect and the dataset class only has to read them.
 - Like the manifest and the splits, the masks are not committed.
 
+## 5. PyTorch dataset and loaders
+
+**Goal:** everything between the stored preprocessed data and the model: batches of image and mask tensors for training and evaluation, and the padding of a single image for inference. Code in `src/mammo_seg/`: `device.py`, and in `data/`: `dataset.py`, `folds.py`, `augmentation.py`, `loaders.py`.
+
+```python
+from pathlib import Path
+from mammo_seg.data.augmentation import Augmentation
+from mammo_seg.data.dataset import MammogramDataset
+from mammo_seg.data.folds import fold_ids
+from mammo_seg.data.loaders import evaluation_loader, training_loader
+from mammo_seg.data.manifest import read_manifest
+from mammo_seg.data.splits import read_splits
+
+manifest = read_manifest(Path("data/processed/manifest.json"))
+ids = fold_ids(manifest, read_splits(Path("data/processed/splits.json")), validation_fold=0)
+data = Path("data/processed/preprocessed")
+train = training_loader(MammogramDataset(data, ids.train, transform=Augmentation()), manifest, batch_size=8)
+validation = evaluation_loader(MammogramDataset(data, ids.validation), batch_size=8)
+```
+
+### Installing PyTorch and choosing the device
+
+PyTorch is an extra that picks its build (see the README): `uv sync --extra cpu` locally and in CI, `--extra cu126` or `--extra cu130` on a GPU machine, and no extra on Kaggle or Colab, where a GPU build is already installed. `resolve_device()` picks the device at run time: a CUDA GPU if there is one, then Apple MPS, then the CPU, or what `MAMMO_SEG_DEVICE` (`cpu`, `cuda`, `cuda:1`, `mps`) says. Asking for a GPU that is not there is an error, not a silent fall back to the CPU.
+
+### Samples
+
+`MammogramDataset(preprocessed_dir, file_ids, settings, canvas, transform)` refuses data preprocessed with other settings and unknown file ids. A sample is a dict:
+
+| Key | Content |
+|---|---|
+| `image` | float32 `[1, 1024, 800]`, normalized to 0..1 by `normalize_intensity`, 0 on the padding |
+| `mask` | float32 `[1, 1024, 800]`, 1 on a mass |
+| `valid` | bool `[1, 1024, 800]`, true on the image, false on the padding |
+| `file_id` | the image id |
+
+Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every preprocessed image is 1024 px high and 276 to 784 px wide; 800 is the next multiple of 32, which a U-Net needs, and the chest wall is on the left, so padding only adds background next to the breast. An image wider than the canvas is an error, not a silent crop. Losses and metrics should only count pixels where `valid` is true, or the padding counts as correctly predicted background.
+
+### Splits
+
+`fold_ids(manifest, splits_file, validation_fold)` gives the training ids (all folds but one) and the validation ids (that fold); `development_ids` gives every fold, for a final model; `held_out_ids` gives the test set. They check the manifest fingerprint and never return the excluded `FB` image. All of a patient's images are in the same set.
+
+### Augmentation
+
+`Augmentation(AugmentationSettings())` is the training transform, built on torchvision `transforms.v2` and applied to image and mask together before padding:
+
+| Setting | Default | Change |
+|---|---|---|
+| `rotation` | 10 | degrees, either way |
+| `scale` | 0.1 | zoom by 1 +- 0.1 |
+| `shift` | 0.1 | of the width and height |
+| `brightness`, `contrast` | 0.1 | factor 1 +- 0.1, image only |
+| `gamma` | 0.2 | exponent 1 +- 0.2, image only |
+| `noise` | 0.01 | Gaussian, standard deviation, image only |
+| `crop_size` | none | a random patch of this size instead of the whole image (not lesion-aware) |
+
+The mask is resampled by nearest neighbour and stays 0/1. There are no flips: every chest wall is on the left after preprocessing, and flipping would show the model breasts it never sees at inference. On real images, the mask area after augmentation is 0.86 to 1.18 times the original, as the 10% scaling implies.
+
+### Loaders and the imbalance
+
+- `training_loader(dataset, manifest, batch_size, positive_fraction=0.5, samples_per_epoch=None, num_workers=0, seed=0)` draws with PyTorch's `WeightedRandomSampler` so that about `positive_fraction` of the images have a mass; 26% of the INbreast images do. It draws with replacement, so an epoch has a fixed length, by default the number of training images. `positive_fraction=None` turns the sampler off and uses every image once per epoch. The last incomplete batch is dropped.
+- `evaluation_loader(dataset, batch_size)` uses every image once, in order, with no sampler and no augmentation: validation and test metrics must reflect the real distribution.
+- Everything random runs from one seeded `torch.Generator`, which also seeds the workers, so a run can be repeated.
+
+On fold 0 of the real splits, one training epoch draws 248 images, 48% with a mass (27% in the fold), and no batch of 8 is without one.
+
+### Inference
+
+A model trained on the canvas still works on any image size. `pad_to_multiple(image)` pads a single preprocessed image up to sides divisible by 32 (an 837 px wide image becomes 864) and returns its size, and `unpad(prediction, size)` cuts the prediction back. `restore_mask` (section 4) then maps it onto the original DICOM.
+
+### Review
+
+`notebooks/04_dataset_review.ipynb` shows one image with several augmentations, a training batch as the loader draws it, and the share of images with a mass per epoch.
+
 ## Next steps
 
-- Preprocessing: orientation, intensity scaling, breast crop and offline downscale of images and masks.
-- The PyTorch dataset that reads the images, masks and splits.
+- The model, the loss and the metrics (Dice, IoU, precision, sensitivity on the valid pixels, positive and all images separately), then the training loop with checkpoints.
