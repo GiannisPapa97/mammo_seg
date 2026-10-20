@@ -1,10 +1,24 @@
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import pytest
 from pydantic import ValidationError
+from tests.data.synthetic import write_dicom_pixels
 
-from mammo_seg.data.preprocessing import BoundingBox, breast_bbox
+from mammo_seg.data.preprocessing import (
+    DEFAULT_MARGIN,
+    DEFAULT_SIZE,
+    BoundingBox,
+    PreprocessingSettings,
+    PreprocessParams,
+    breast_bbox,
+    preprocess,
+    preprocess_mask,
+    read_pixels,
+    restore_mask,
+    target_shape,
+)
 
 
 def image(
@@ -218,3 +232,291 @@ def test_invalid_arguments_are_rejected(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         breast_bbox(image(breast=(20, 70, 10, 50)), **arguments)  # type: ignore[arg-type]
+
+
+# --- the chain: crop, rescale, flip ---
+
+# Every pixel of the breast, no margin and no opening, so geometry is easy to follow.
+EXACT_SETTINGS = PreprocessingSettings(margin=0.0, downscale=1, opening=0, size=100)
+
+
+def two_tone_breast() -> np.ndarray:
+    """A 400 x 300 image with a 200 x 100 breast: dark left half, bright right half."""
+    pixels = np.zeros((400, 300), dtype=np.uint16)
+    pixels[100:300, 100:150] = 1000
+    pixels[100:300, 150:200] = 3000
+    return pixels
+
+
+@pytest.mark.parametrize(
+    ("height", "width", "expected"),
+    [
+        (2000, 800, (1024, 410)),
+        (800, 2000, (410, 1024)),
+        (1024, 1024, (1024, 1024)),
+        (100, 100000, (1, 1024)),
+    ],
+)
+def test_the_longer_side_gets_the_target_size(
+    height: int, width: int, expected: tuple[int, int]
+) -> None:
+    assert target_shape(height, width, 1024) == expected
+
+
+def test_the_result_is_cropped_and_rescaled_by_averaging() -> None:
+    result, params = preprocess(two_tone_breast(), "L", EXACT_SETTINGS)
+    assert result.shape == (100, 50)  # the 200 x 100 crop at half size
+    assert result.dtype == np.uint16
+    assert (result[:, :25] == 1000).all()
+    assert (result[:, 25:] == 3000).all()
+    assert params.box == BoundingBox(top=100, bottom=300, left=100, right=200)
+    assert params.shape == (100, 50)
+    assert params.source_shape == (400, 300)
+
+
+def test_averaging_blends_pixels_inside_each_target_pixel() -> None:
+    pixels = np.zeros((40, 40), dtype=np.uint16)
+    pixels[10:30, 10:30] = np.tile(
+        np.array([[1000, 3000], [3000, 1000]], dtype=np.uint16), (10, 10)
+    )
+    result, _ = preprocess(
+        pixels, "L", PreprocessingSettings(margin=0.0, downscale=1, opening=0, size=10)
+    )
+    assert result.shape == (10, 10)
+    assert (result == 2000).all()
+
+
+def test_a_left_breast_is_not_flipped_and_a_right_breast_is() -> None:
+    left, left_params = preprocess(two_tone_breast(), "L", EXACT_SETTINGS)
+    right, right_params = preprocess(two_tone_breast(), "R", EXACT_SETTINGS)
+    assert not left_params.flipped and right_params.flipped
+    assert left[0, 0] == 1000 and left[0, -1] == 3000
+    assert right[0, 0] == 3000 and right[0, -1] == 1000
+    assert np.array_equal(right, left[:, ::-1])
+
+
+def test_the_longer_side_is_the_size_in_the_settings() -> None:
+    pixels = two_tone_breast()
+    for size in (64, 200, 300):
+        result, params = preprocess(
+            pixels,
+            "L",
+            PreprocessingSettings(margin=0.0, size=size, downscale=1, opening=0),
+        )
+        assert max(result.shape) == size
+        assert result.shape == params.shape
+
+
+def test_the_default_settings_make_a_1024_pixel_image() -> None:
+    pixels = np.zeros((4084, 3328), dtype=np.uint16)
+    pixels[300:3800, 1500:3328] = 1500
+    result, params = preprocess(pixels, "R")
+    assert max(result.shape) == DEFAULT_SIZE
+    assert result.shape == params.shape
+    assert params.box.top < 300 and params.box.bottom > 3800  # the margin
+
+
+def test_preprocessing_is_deterministic() -> None:
+    first, first_params = preprocess(two_tone_breast(), "R", EXACT_SETTINGS)
+    second, second_params = preprocess(two_tone_breast(), "R", EXACT_SETTINGS)
+    assert np.array_equal(first, second)
+    assert first_params == second_params
+
+
+def test_the_input_is_not_modified() -> None:
+    pixels = two_tone_breast()
+    before = pixels.copy()
+    preprocess(pixels, "R", EXACT_SETTINGS)
+    assert np.array_equal(pixels, before)
+
+
+def test_an_unknown_laterality_is_rejected() -> None:
+    with pytest.raises(ValueError, match="laterality must be L or R"):
+        preprocess(two_tone_breast(), "X", EXACT_SETTINGS)  # type: ignore[arg-type]
+
+
+def test_an_image_without_a_breast_is_rejected_by_the_chain() -> None:
+    with pytest.raises(ValueError, match="no breast found"):
+        preprocess(np.zeros((100, 100), dtype=np.uint16), "L", EXACT_SETTINGS)
+
+
+# --- settings and parameters ---
+
+
+def test_the_default_settings_are_the_documented_ones() -> None:
+    settings = PreprocessingSettings()
+    assert (settings.threshold, settings.downscale, settings.opening) == (100, 8, 1)
+    assert settings.margin == DEFAULT_MARGIN
+    assert settings.size == DEFAULT_SIZE == 1024
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"threshold": -1},
+        {"margin": -0.1},
+        {"downscale": 0},
+        {"opening": -1},
+        {"size": 0},
+    ],
+)
+def test_invalid_settings_are_rejected(changes: dict[str, float]) -> None:
+    with pytest.raises(ValidationError):
+        PreprocessingSettings(**changes)  # type: ignore[arg-type]
+
+
+def test_settings_do_not_convert_types() -> None:
+    with pytest.raises(ValidationError):
+        PreprocessingSettings(size="1024")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        PreprocessingSettings(size=1024.0)  # type: ignore[arg-type]
+
+
+def test_params_reject_a_box_outside_the_source_image() -> None:
+    box = BoundingBox(top=0, bottom=500, left=0, right=100)
+    with pytest.raises(ValidationError, match="does not fit"):
+        PreprocessParams(source_shape=(400, 300), box=box, shape=(10, 5), flipped=False)
+
+
+def test_params_reject_an_empty_shape() -> None:
+    box = BoundingBox(top=0, bottom=100, left=0, right=100)
+    with pytest.raises(ValidationError):
+        PreprocessParams(source_shape=(400, 300), box=box, shape=(0, 5), flipped=False)
+
+
+# --- masks follow the image ---
+
+
+def lesion_image_and_mask() -> tuple[np.ndarray, np.ndarray]:
+    """A breast with a bright lesion near its right side, and the lesion's mask."""
+    pixels = np.zeros((600, 500), dtype=np.uint16)
+    pixels[100:500, 100:400] = 1000
+    pixels[250:330, 300:380] = 4000
+    mask = np.zeros((600, 500), dtype=np.uint8)
+    mask[250:330, 300:380] = 1
+    return pixels, mask
+
+
+@pytest.mark.parametrize("laterality", ["L", "R"])
+def test_the_mask_stays_on_the_lesion_after_preprocessing(laterality: str) -> None:
+    pixels, mask = lesion_image_and_mask()
+    settings = PreprocessingSettings(margin=0.05, downscale=1, opening=0, size=200)
+    image, params = preprocess(pixels, laterality, settings)  # type: ignore[arg-type]
+    small_mask = preprocess_mask(mask, params)
+    assert small_mask.shape == image.shape
+    assert small_mask.dtype == np.uint8
+    assert set(np.unique(small_mask)) == {0, 1}
+    lesion = image > 2500
+    overlap = (lesion & (small_mask == 1)).sum()
+    assert overlap / (lesion | (small_mask == 1)).sum() > 0.9
+
+
+def test_a_flipped_mask_is_on_the_other_side() -> None:
+    pixels, mask = lesion_image_and_mask()
+    settings = PreprocessingSettings(margin=0.0, downscale=1, opening=0, size=100)
+    _, left_params = preprocess(pixels, "L", settings)
+    _, right_params = preprocess(pixels, "R", settings)
+    left = preprocess_mask(mask, left_params)
+    right = preprocess_mask(mask, right_params)
+    assert left.sum() == right.sum() > 0
+    assert np.array_equal(right, left[:, ::-1])
+    assert np.where(left)[1].mean() > left.shape[1] / 2  # the lesion is on the right
+    assert np.where(right)[1].mean() < right.shape[1] / 2
+
+
+def test_a_small_mask_keeps_its_area_in_proportion() -> None:
+    pixels, mask = lesion_image_and_mask()
+    settings = PreprocessingSettings(margin=0.0, downscale=1, opening=0, size=150)
+    _, params = preprocess(pixels, "L", settings)
+    scale = params.shape[0] / params.box.height
+    small = preprocess_mask(mask, params)
+    assert small.sum() == pytest.approx(mask.sum() * scale**2, rel=0.05)
+
+
+def test_the_mask_must_have_the_shape_of_the_source_image() -> None:
+    pixels, mask = lesion_image_and_mask()
+    _, params = preprocess(pixels, "L", EXACT_SETTINGS)
+    with pytest.raises(ValueError, match="mask shape"):
+        preprocess_mask(mask[:-1], params)
+
+
+def test_the_mask_must_be_binary() -> None:
+    pixels, mask = lesion_image_and_mask()
+    _, params = preprocess(pixels, "L", EXACT_SETTINGS)
+    mask[250, 300] = 2
+    with pytest.raises(ValueError, match="only 0 and 1"):
+        preprocess_mask(mask, params)
+
+
+def test_a_crop_that_cuts_the_mask_is_an_error() -> None:
+    pixels, mask = lesion_image_and_mask()
+    _, params = preprocess(pixels, "L", EXACT_SETTINGS)
+    mask[10:20, 10:20] = 1  # outside the breast box
+    with pytest.raises(ValueError, match="cuts the mask"):
+        preprocess_mask(mask, params)
+
+
+@pytest.mark.parametrize("laterality", ["L", "R"])
+def test_a_mask_can_be_restored_onto_the_original_image(laterality: str) -> None:
+    pixels, mask = lesion_image_and_mask()
+    settings = PreprocessingSettings(margin=0.05, downscale=1, opening=0, size=200)
+    _, params = preprocess(pixels, laterality, settings)  # type: ignore[arg-type]
+    restored = restore_mask(preprocess_mask(mask, params), params)
+    assert restored.shape == mask.shape
+    assert restored.dtype == np.uint8
+    overlap = ((restored == 1) & (mask == 1)).sum()
+    assert overlap / ((restored == 1) | (mask == 1)).sum() > 0.9
+    assert restored[: params.box.top].sum() == 0  # nothing outside the crop
+
+
+def test_restoring_checks_the_mask() -> None:
+    pixels, mask = lesion_image_and_mask()
+    _, params = preprocess(pixels, "L", EXACT_SETTINGS)
+    with pytest.raises(ValueError, match="mask shape"):
+        restore_mask(np.zeros((5, 5), dtype=np.uint8), params)
+    wrong = np.full(params.shape, 3, dtype=np.uint8)
+    with pytest.raises(ValueError, match="only 0 and 1"):
+        restore_mask(wrong, params)
+
+
+# --- reading DICOM files ---
+
+
+def test_a_dicom_is_read_as_a_uint16_array(tmp_path: Path) -> None:
+    pixels = np.arange(12, dtype=np.uint16).reshape(3, 4) * 300
+    write_dicom_pixels(tmp_path / "a.dcm", pixels)
+    read = read_pixels(tmp_path / "a.dcm")
+    assert read.dtype == np.uint16
+    assert np.array_equal(read, pixels)
+
+
+def test_an_8_bit_dicom_is_widened(tmp_path: Path) -> None:
+    pixels = np.arange(12, dtype=np.uint8).reshape(3, 4)
+    write_dicom_pixels(tmp_path / "a.dcm", pixels)
+    read = read_pixels(tmp_path / "a.dcm")
+    assert read.dtype == np.uint16
+    assert np.array_equal(read, pixels)
+
+
+@pytest.mark.parametrize(
+    ("photometric", "elements", "message"),
+    [
+        ("MONOCHROME1", {}, "expected MONOCHROME2"),
+        ("MONOCHROME2", {"RescaleSlope": 2}, "rescale slope or intercept"),
+        ("MONOCHROME2", {"RescaleIntercept": -1024}, "rescale slope or intercept"),
+        ("MONOCHROME2", {"SamplesPerPixel": 3}, "one channel"),
+    ],
+)
+def test_an_unsupported_dicom_is_rejected(
+    tmp_path: Path, photometric: str, elements: dict[str, object], message: str
+) -> None:
+    pixels = np.ones((3, 4), dtype=np.uint16)
+    write_dicom_pixels(tmp_path / "a.dcm", pixels, photometric, **elements)
+    with pytest.raises(ValueError, match=message):
+        read_pixels(tmp_path / "a.dcm")
+
+
+def test_a_signed_dicom_is_rejected(tmp_path: Path) -> None:
+    write_dicom_pixels(tmp_path / "a.dcm", np.ones((3, 4), dtype=np.int16))
+    with pytest.raises(ValueError, match="unsigned image"):
+        read_pixels(tmp_path / "a.dcm")

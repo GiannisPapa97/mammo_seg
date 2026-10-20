@@ -3,6 +3,7 @@
 import plistlib
 from pathlib import Path
 
+import numpy as np
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import UID, ExplicitVRLittleEndian, generate_uid
 
@@ -11,14 +12,44 @@ CSV_HEADER = (
 )
 
 
-def write_dicom(path: Path, rows: int, cols: int) -> None:
+def _new_dicom(path: Path) -> FileDataset:
     meta = FileMetaDataset()
     meta.MediaStorageSOPClassUID = UID("1.2.840.10008.5.1.4.1.1.7")
     meta.MediaStorageSOPInstanceUID = generate_uid()
     meta.TransferSyntaxUID = ExplicitVRLittleEndian
-    dataset = FileDataset(str(path), {}, file_meta=meta, preamble=b"\0" * 128)
+    return FileDataset(str(path), {}, file_meta=meta, preamble=b"\0" * 128)
+
+
+def write_dicom(path: Path, rows: int, cols: int) -> None:
+    """A DICOM file with a size but no pixel data."""
+    dataset = _new_dicom(path)
     dataset.Rows = rows
     dataset.Columns = cols
+    dataset.save_as(path, enforce_file_format=True)
+
+
+def write_dicom_pixels(
+    path: Path,
+    pixels: np.ndarray,
+    photometric: str = "MONOCHROME2",
+    **elements: object,
+) -> None:
+    """A DICOM file with pixel data (one channel, as stored in the dataset).
+
+    Extra keyword arguments are set as DICOM elements, for example
+    ``RescaleSlope=2``.
+    """
+    dataset = _new_dicom(path)
+    dataset.Rows, dataset.Columns = pixels.shape[:2]
+    dataset.SamplesPerPixel = 1
+    dataset.PhotometricInterpretation = photometric
+    dataset.BitsAllocated = pixels.dtype.itemsize * 8
+    dataset.BitsStored = dataset.BitsAllocated
+    dataset.HighBit = dataset.BitsStored - 1
+    dataset.PixelRepresentation = 1 if pixels.dtype.kind == "i" else 0
+    for keyword, value in elements.items():
+        setattr(dataset, keyword, value)
+    dataset.PixelData = pixels.tobytes()
     dataset.save_as(path, enforce_file_format=True)
 
 
