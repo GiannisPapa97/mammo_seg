@@ -29,8 +29,10 @@ for tool in curl unzip; do
     fi
 done
 
+# Prints 0 when the folder does not exist (find fails, which pipefail would
+# otherwise turn into a silent exit).
 count_dicoms() {
-    find "$dicom_dir" -maxdepth 1 -name '*.dcm' 2> /dev/null | wc -l
+    { find "$dicom_dir" -maxdepth 1 -name '*.dcm' 2> /dev/null || true; } | wc -l
 }
 
 file_size() {
