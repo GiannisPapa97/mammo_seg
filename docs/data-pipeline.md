@@ -175,6 +175,7 @@ It reads `data/processed/manifest.json` and writes `data/processed/masks/<file_i
 - All `mass` polygons of an image are merged into one mask; overlapping masses become one region. The lesion type is an argument of `rasterize`, so another type can be drawn later. ROIs with fewer than 3 points (single-point calcifications) have no area and leave the mask empty.
 - Polygon coordinates are in continuous image space, `(x, y)` = `(column, row)`, with the origin at the top-left corner, so the centre of pixel `(row, column)` is at `(column + 0.5, row + 0.5)`. A pixel is set when its centre is inside the polygon (even-odd rule). This is done with a small scanline routine in NumPy and is tested against an independent brute-force point-in-polygon check.
 - Polygons that leave the image are clipped to it. This affects 3 of the 116 masses, which stick out by a few pixels.
+- The polygons are drawn as annotated. For 12 of the 116 masses, spiky vertices leave isolated specks of 1 to 47 pixels next to the main region (which has 8,000 to 130,000 pixels); they are kept in the mask.
 
 ### Validation
 
