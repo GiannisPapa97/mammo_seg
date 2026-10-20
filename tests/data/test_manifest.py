@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from tests.data.synthetic import write_annotation, write_dicom
 
 from mammo_seg.data.manifest import (
@@ -117,7 +118,7 @@ def test_rois_frame_has_one_row_per_roi(dataset_dir: Path) -> None:
 
 
 def test_frames_of_an_empty_manifest_keep_their_columns() -> None:
-    empty = Manifest(images=())
+    empty = Manifest(version=1, images=())
     assert list(images_frame(empty).columns) == IMAGE_COLUMNS
     assert list(rois_frame(empty).columns) == ROI_COLUMNS
 
@@ -238,14 +239,14 @@ def test_written_manifest_is_json_with_one_image_per_line(
 def test_read_manifest_rejects_a_file_with_a_missing_field(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     path.write_text('{"version": 1, "images": [{"file_id": "1"}]}')
-    with pytest.raises(ValueError, match="missing field"):
+    with pytest.raises(ValidationError, match="Field required"):
         read_manifest(path)
 
 
 def test_read_manifest_rejects_another_version(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
     path.write_text('{"version": 2, "images": []}')
-    with pytest.raises(ValueError, match="unsupported manifest version 2"):
+    with pytest.raises(ValidationError, match="version"):
         read_manifest(path)
 
 

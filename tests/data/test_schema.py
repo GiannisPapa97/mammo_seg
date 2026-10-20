@@ -1,6 +1,9 @@
+import json
+from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from mammo_seg.data.schema import (
     SCHEMA_VERSION,
@@ -8,6 +11,8 @@ from mammo_seg.data.schema import (
     LesionType,
     Manifest,
     Roi,
+    image_to_json,
+    manifest_from_json,
     polygon_area,
 )
 
@@ -36,6 +41,11 @@ def make_image(**changes: Any) -> ImageRecord:
     return ImageRecord(**{**fields, **changes})
 
 
+def manifest_json(*images: ImageRecord, version: int = SCHEMA_VERSION) -> str:
+    items = ",".join(image_to_json(image) for image in images)
+    return f'{{"version": {version}, "images": [{items}]}}'
+
+
 def test_polygon_area_of_square() -> None:
     assert polygon_area(SQUARE) == 12.0
 
@@ -55,26 +65,6 @@ def test_roi_area_uses_its_points() -> None:
     assert Roi(LesionType.MASS, SQUARE).area_px == 12.0
 
 
-def test_roi_round_trips_through_a_dict() -> None:
-    roi = Roi(LesionType.SPICULATED_REGION, SQUARE)
-    data = roi.to_dict()
-    assert data == {
-        "lesion_type": "spiculated_region",
-        "points": [[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]],
-    }
-    assert Roi.from_dict(data) == roi
-
-
-def test_roi_rejects_a_point_with_three_values() -> None:
-    with pytest.raises(ValueError, match="expected a point"):
-        Roi.from_dict({"lesion_type": "mass", "points": [[1, 2, 3]]})
-
-
-def test_roi_rejects_an_unknown_lesion_type() -> None:
-    with pytest.raises(ValueError, match="cyst"):
-        Roi.from_dict({"lesion_type": "cyst", "points": []})
-
-
 def test_image_counts_masses_among_all_rois() -> None:
     image = make_image()
     assert image.n_masses == 2
@@ -88,35 +78,86 @@ def test_image_without_masses_is_negative() -> None:
     assert not make_image(rois=(), has_annotation=False).has_mass
 
 
+def test_records_are_immutable() -> None:
+    image = make_image()
+    with pytest.raises(FrozenInstanceError):
+        image.rows = 7  # type: ignore[misc]
+
+
+def test_image_json_has_the_documented_shape() -> None:
+    data = json.loads(image_to_json(make_image(rois=(Roi(LesionType.MASS, SQUARE),))))
+    assert list(data) == [
+        "file_id",
+        "patient_id",
+        "laterality",
+        "view",
+        "dicom_path",
+        "rows",
+        "cols",
+        "acquisition_date",
+        "acr",
+        "birads",
+        "has_annotation",
+        "rois",
+    ]
+    assert data["rois"] == [
+        {
+            "lesion_type": "mass",
+            "points": [[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]],
+        }
+    ]
+
+
 @pytest.mark.parametrize("acr", [2, None])
-def test_image_round_trips_through_a_dict(acr: int | None) -> None:
-    image = make_image(acr=acr)
-    assert ImageRecord.from_dict(image.to_dict()) == image
-
-
-def test_image_rejects_an_invalid_laterality() -> None:
-    data = make_image().to_dict()
-    data["laterality"] = "X"
-    with pytest.raises(ValueError, match="laterality must be L or R"):
-        ImageRecord.from_dict(data)
-
-
-def test_image_rejects_a_missing_field() -> None:
-    data = make_image().to_dict()
-    del data["rows"]
-    with pytest.raises(KeyError, match="rows"):
-        ImageRecord.from_dict(data)
-
-
-def test_manifest_round_trips_through_a_dict() -> None:
-    manifest = Manifest(images=(make_image(), make_image(file_id="2", acr=None)))
-    data = manifest.to_dict()
-    assert data["version"] == SCHEMA_VERSION
-    assert Manifest.from_dict(data) == manifest
+def test_manifest_round_trips_through_json(acr: int | None) -> None:
+    images = (make_image(acr=acr), make_image(file_id="2", rois=()))
+    assert manifest_from_json(manifest_json(*images)) == Manifest(
+        version=SCHEMA_VERSION, images=images
+    )
 
 
 def test_manifest_rejects_another_version() -> None:
-    with pytest.raises(ValueError, match="unsupported manifest version 99"):
-        Manifest.from_dict({"version": 99, "images": []})
-    with pytest.raises(ValueError, match="unsupported manifest version None"):
-        Manifest.from_dict({"images": []})
+    with pytest.raises(ValidationError, match="version"):
+        manifest_from_json(manifest_json(version=99))
+
+
+def test_manifest_rejects_a_missing_version() -> None:
+    with pytest.raises(ValidationError, match="version"):
+        manifest_from_json('{"images": []}')
+
+
+def test_invalid_laterality_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="laterality"):
+        make_image(laterality="X")
+
+
+def test_unknown_lesion_type_in_a_file_is_rejected() -> None:
+    text = manifest_json(make_image()).replace('"mass"', '"cyst"')
+    with pytest.raises(ValidationError, match="lesion_type"):
+        manifest_from_json(text)
+
+
+def test_point_with_three_values_in_a_file_is_rejected() -> None:
+    text = manifest_json(make_image()).replace("[1.0,1.0]", "[1.0,1.0,1.0]")
+    with pytest.raises(ValidationError, match="points"):
+        manifest_from_json(text)
+
+
+def test_missing_field_in_a_file_is_rejected() -> None:
+    text = manifest_json(make_image()).replace('"rows":6,', "")
+    with pytest.raises(ValidationError, match="rows"):
+        manifest_from_json(text)
+
+
+def test_extra_field_in_a_file_is_rejected() -> None:
+    text = manifest_json(make_image()).replace('"rows":6,', '"rows":6,"extra":1,')
+    with pytest.raises(ValidationError, match="extra"):
+        manifest_from_json(text)
+
+
+def test_strict_mode_does_not_convert_types() -> None:
+    with pytest.raises(ValidationError, match="rows"):
+        make_image(rows="6")
+    text = manifest_json(make_image()).replace('"rows":6', '"rows":"6"')
+    with pytest.raises(ValidationError, match="rows"):
+        manifest_from_json(text)

@@ -11,7 +11,6 @@ Run it with ``python -m mammo_seg.data.manifest``.
 
 import argparse
 import csv
-import json
 import re
 import sys
 from collections import Counter
@@ -23,7 +22,14 @@ import pandas as pd
 import pydicom
 
 from mammo_seg.data.annotations import read_rois
-from mammo_seg.data.schema import SCHEMA_VERSION, ImageRecord, Manifest, Roi
+from mammo_seg.data.schema import (
+    SCHEMA_VERSION,
+    ImageRecord,
+    Manifest,
+    Roi,
+    image_to_json,
+    manifest_from_json,
+)
 
 DEFAULT_DATASET_DIR = Path("data/raw/INbreast Release 1.0")
 DEFAULT_OUTPUT = Path("data/processed/manifest.json")
@@ -204,25 +210,23 @@ def build_manifest(dataset_dir: Path) -> Manifest:
                 rois=annotations.get(file_id, ()),
             )
         )
-    return Manifest(images=tuple(images))
+    return Manifest(version=SCHEMA_VERSION, images=tuple(images))
 
 
 def write_manifest(manifest: Manifest, path: Path) -> None:
     """Write the manifest as JSON, one image per line so it stays readable."""
-    lines = ",\n".join(
-        "  " + json.dumps(image.to_dict(), separators=(",", ":"))
-        for image in manifest.images
-    )
+    lines = ",\n".join("  " + image_to_json(image) for image in manifest.images)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f'{{"version": {SCHEMA_VERSION}, "images": [\n{lines}\n]}}\n')
+    path.write_text(f'{{"version": {manifest.version}, "images": [\n{lines}\n]}}\n')
 
 
 def read_manifest(path: Path) -> Manifest:
-    """Read a manifest written by ``write_manifest``; raises ValueError if invalid."""
-    try:
-        return Manifest.from_dict(json.loads(path.read_text()))
-    except KeyError as error:
-        raise ValueError(f"{path}: missing field {error}") from error
+    """Read a manifest written by ``write_manifest``.
+
+    Raises ``pydantic.ValidationError`` (a ``ValueError``) if the file does not
+    match the schema.
+    """
+    return manifest_from_json(path.read_text())
 
 
 def images_frame(manifest: Manifest) -> pd.DataFrame:
@@ -232,11 +236,7 @@ def images_frame(manifest: Manifest) -> pd.DataFrame:
     """
     frame = pd.DataFrame(
         [
-            {
-                **{k: v for k, v in image.to_dict().items() if k != "rois"},
-                "n_masses": image.n_masses,
-                "has_mass": image.has_mass,
-            }
+            {column: getattr(image, column) for column in IMAGE_COLUMNS}
             for image in manifest.images
         ],
         columns=pd.Index(IMAGE_COLUMNS),

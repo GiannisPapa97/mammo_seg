@@ -13,18 +13,27 @@ annotated lesion (ROI) with a type and a polygon. It is stored as JSON::
       ...
     ]}
 
+The classes are frozen pydantic dataclasses in strict mode: an object cannot be
+built, or a file read, with a wrong type or an unknown field value. Pydantic
+raises ``pydantic.ValidationError`` (a ``ValueError``) saying which value is
+wrong.
+
 Coordinates are pixels, ``(x, y)`` = ``(column, row)``. Facts that follow from
 the ROIs (such as the number of masses) are computed, not stored.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Literal, Self
+from typing import Final, Literal
 
-SCHEMA_VERSION = 1
+from pydantic import ConfigDict, TypeAdapter
+from pydantic.dataclasses import dataclass
+
+SCHEMA_VERSION: Final = 1
 
 Point = tuple[float, float]
+
+_CONFIG = ConfigDict(strict=True, extra="forbid")
 
 
 class LesionType(StrEnum):
@@ -49,7 +58,7 @@ def polygon_area(points: Sequence[Point]) -> float:
     return abs(twice_area) / 2
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=_CONFIG)
 class Roi:
     """One annotated lesion: its type and its polygon outline."""
 
@@ -60,23 +69,8 @@ class Roi:
     def area_px(self) -> float:
         return polygon_area(self.points)
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "lesion_type": self.lesion_type.value,
-            "points": [list(point) for point in self.points],
-        }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Self:
-        points = []
-        for point in data["points"]:
-            if len(point) != 2:
-                raise ValueError(f"expected a point [x, y], got {point!r}")
-            points.append((float(point[0]), float(point[1])))
-        return cls(lesion_type=LesionType(data["lesion_type"]), points=tuple(points))
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=_CONFIG)
 class ImageRecord:
     """One mammogram: its metadata and all its annotated lesions."""
 
@@ -101,63 +95,24 @@ class ImageRecord:
     def has_mass(self) -> bool:
         return self.n_masses > 0
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "file_id": self.file_id,
-            "patient_id": self.patient_id,
-            "laterality": self.laterality,
-            "view": self.view,
-            "dicom_path": self.dicom_path,
-            "rows": self.rows,
-            "cols": self.cols,
-            "acquisition_date": self.acquisition_date,
-            "acr": self.acr,
-            "birads": self.birads,
-            "has_annotation": self.has_annotation,
-            "rois": [roi.to_dict() for roi in self.rois],
-        }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Self:
-        laterality = data["laterality"]
-        if laterality not in ("L", "R"):
-            raise ValueError(f"laterality must be L or R, got {laterality!r}")
-        acr = data["acr"]
-        return cls(
-            file_id=str(data["file_id"]),
-            patient_id=str(data["patient_id"]),
-            laterality=laterality,
-            view=str(data["view"]),
-            dicom_path=str(data["dicom_path"]),
-            rows=int(data["rows"]),
-            cols=int(data["cols"]),
-            acquisition_date=str(data["acquisition_date"]),
-            acr=None if acr is None else int(acr),
-            birads=str(data["birads"]),
-            has_annotation=bool(data["has_annotation"]),
-            rois=tuple(Roi.from_dict(roi) for roi in data["rois"]),
-        )
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, config=_CONFIG)
 class Manifest:
-    """All images of the dataset."""
+    """All images of the dataset, with the version of this schema."""
 
+    version: Literal[1]
     images: tuple[ImageRecord, ...]
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "version": SCHEMA_VERSION,
-            "images": [image.to_dict() for image in self.images],
-        }
 
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Self:
-        version = data.get("version")
-        if version != SCHEMA_VERSION:
-            raise ValueError(
-                f"unsupported manifest version {version!r}, expected {SCHEMA_VERSION}"
-            )
-        return cls(
-            images=tuple(ImageRecord.from_dict(image) for image in data["images"])
-        )
+_IMAGE = TypeAdapter(ImageRecord)
+_MANIFEST = TypeAdapter(Manifest)
+
+
+def image_to_json(image: ImageRecord) -> str:
+    """One image as compact JSON."""
+    return _IMAGE.dump_json(image).decode()
+
+
+def manifest_from_json(text: str) -> Manifest:
+    """Parse and validate a manifest; raises ``pydantic.ValidationError``."""
+    return _MANIFEST.validate_json(text)

@@ -16,7 +16,7 @@ By default it reads `data/raw/INbreast Release 1.0` and writes `data/processed/m
 
 Code, all in `src/mammo_seg/data/`:
 
-- `schema.py`: the schema (`LesionType`, `Roi`, `ImageRecord`, `Manifest`) and its JSON conversion.
+- `schema.py`: the schema (`LesionType`, `Roi`, `ImageRecord`, `Manifest`) as frozen pydantic dataclasses, and the JSON conversion.
 - `annotations.py`: reads the XML annotation files and normalizes lesion names.
 - `manifest.py`: builds and validates the manifest, writes and reads the JSON file, and converts it to pandas tables.
 
@@ -61,7 +61,7 @@ The lesion type is a closed set. Raw names are mapped to it, merging misspelling
 
 ### Reading and computed values
 
-`read_manifest(path)` returns a `Manifest` (frozen dataclasses). Facts that follow from the ROIs are computed, not stored:
+`read_manifest(path)` returns a `Manifest`. Facts that follow from the ROIs are computed, not stored:
 
 - `ImageRecord.n_masses` and `ImageRecord.has_mass` (the positive label for mass segmentation)
 - `Roi.area_px`, the polygon area in pixels (not clipped to the image)
@@ -79,7 +79,7 @@ For splitting and analysis, `images_frame(manifest)` gives one row per image (in
 - `INbreast.csv` has the expected columns, no duplicate file ids and valid ACR values
 - every annotation file describes one image, its lesion names are known and its points can be read
 
-`read_manifest` rejects a file with another schema version or missing fields.
+The schema classes are validated by [pydantic](https://docs.pydantic.dev) in strict mode, so a wrong type, a missing or extra field, an unknown lesion type or another schema version is rejected both when an object is built and when a file is read. `read_manifest` raises `pydantic.ValidationError` (a `ValueError`) that names the offending value.
 
 ### On the real data
 
