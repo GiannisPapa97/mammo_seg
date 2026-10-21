@@ -17,7 +17,9 @@ from mammo_seg.engine.checkpoint import (
 )
 from mammo_seg.engine.model import ModelSettings, build_model
 
-SETTINGS = ModelSettings(encoder="resnet18", encoder_weights=None)
+# A tiny encoder (9 MB of weights): the tests save many checkpoints.
+TINY = "tu-mobilenetv3_small_050"
+SETTINGS = ModelSettings(encoder=TINY, encoder_weights=None)
 PREPROCESSING = PreprocessingSettings(size=512, margin=0.05)
 
 
@@ -75,7 +77,7 @@ def test_a_rebuilt_model_never_asks_for_pretrained_weights(
         return real(settings)
 
     monkeypatch.setattr(checkpoint_module, "build_model", spy)
-    pretrained = ModelSettings(encoder="resnet18", encoder_weights="imagenet")
+    pretrained = ModelSettings(encoder=TINY, encoder_weights="imagenet")
     save_checkpoint(tmp_path / "model.pt", model, pretrained, PREPROCESSING)
     model_from_checkpoint(load_checkpoint(tmp_path / "model.pt"))
     assert requested == [None]
@@ -163,6 +165,7 @@ def test_a_failed_save_keeps_the_previous_checkpoint(
     assert [p.name for p in tmp_path.iterdir()] == ["model.pt"]
 
 
+@pytest.mark.filterwarnings("ignore:Detected pickle protocol")
 def test_a_checkpoint_with_code_in_it_is_not_loaded(tmp_path: Path) -> None:
     class Payload:
         def __reduce__(self) -> tuple[object, tuple[str]]:
@@ -221,7 +224,7 @@ def test_invalid_settings_in_a_file_are_an_error(
 def test_weights_that_do_not_fit_the_model_are_an_error(
     tmp_path: Path, model: torch.nn.Module
 ) -> None:
-    other = ModelSettings(architecture="fpn", encoder="resnet18", encoder_weights=None)
+    other = ModelSettings(architecture="fpn", encoder=TINY, encoder_weights=None)
     save_checkpoint(tmp_path / "model.pt", model, other, PREPROCESSING)
     with pytest.raises(RuntimeError, match="size mismatch|Missing key|Unexpected key"):
         model_from_checkpoint(load_checkpoint(tmp_path / "model.pt"))

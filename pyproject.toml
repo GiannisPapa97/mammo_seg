@@ -88,6 +88,8 @@ explicit = true
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--cov --strict-markers --import-mode=importlib"
+# Delete the temporary files of passing tests; some tests write model checkpoints.
+tmp_path_retention_policy = "failed"
 markers = [
     "integration: runs a full workflow end to end on synthetic data",
     "slow: takes more than about 30 seconds",
