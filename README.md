@@ -20,7 +20,7 @@ uv sync --extra cu130    # a GPU machine with a recent NVIDIA driver (CUDA 13.0)
 
 A plain `uv sync` installs no PyTorch and removes it if it was installed.
 
-**Kaggle, Google Colab and other cloud notebooks.** They come with a GPU build of PyTorch already installed, which must not be replaced. Install the package with the `cloud` extra, which adds the model library and leaves PyTorch alone:
+**Kaggle (tried), Google Colab and other cloud notebooks (not tried).** They come with a GPU build of PyTorch already installed, which must not be replaced. Install the package with the `cloud` extra, which adds the model library and leaves PyTorch alone:
 
 ```bash
 pip install ".[cloud]"
@@ -86,7 +86,7 @@ uv run mammo-seg train --fold 0
 uv run mammo-seg train --fold 0 --resume    # continue after a stop
 ```
 
-On Kaggle or Colab use [notebooks/05_cloud_training.ipynb](notebooks/05_cloud_training.ipynb), which rebuilds the data from the attached dataset and stops cleanly before the session limit. See [docs/training.md](docs/training.md) for the settings, the files a run writes, and what has been tried.
+On Kaggle use [notebooks/05_kaggle_training.ipynb](notebooks/05_kaggle_training.ipynb), which rebuilds the data from the attached dataset, trains one or more folds and stops cleanly before the session limit. See [docs/training.md](docs/training.md) for the settings, the files a run writes, and what has been tried.
 
 ## License
 

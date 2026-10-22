@@ -72,9 +72,9 @@ A small convolutional network trained on two real positive images (at a quarter 
 
 smp adapts the pretrained first layer to a grayscale image by summing its weights over the colour channels. The input sides do not have to divide by 32 (smp handles it), but training and validation use the 1024 x 800 canvas and inference pads to a multiple of 32 (`pad_to_multiple`), like the data loaders.
 
-### Free cloud GPUs (Kaggle, Colab)
+### Free cloud GPUs (Kaggle)
 
-The model code runs the same on a CPU and on a GPU, so tests and smoke runs happen locally and real training on a cloud notebook:
+The model code runs the same on a CPU and on a GPU, so tests and smoke runs happen locally and real training on a cloud notebook (only Kaggle was tried):
 
 1. **Install without touching PyTorch.** The notebook comes with a GPU build of PyTorch. Install the package with `pip install ".[cloud]"` (see the README); a simulated install into an environment that already had PyTorch left it untouched.
 2. **The device** is chosen by `resolve_device()`: `auto` picks the GPU. Asking for `cuda` on a notebook without a GPU is an error, not a silent run on the CPU.
@@ -142,15 +142,22 @@ mammo-seg train --epochs 30 --selection-metric with_mass.dice --device cuda
 
 The data steps are the same commands as `python -m mammo_seg.data.<step>`: `mammo-seg manifest`, `splits`, `masks` and `preprocess`. Training reads the preprocessing settings and the canvas from the preprocessed data, so they cannot disagree with it.
 
-On Kaggle or Colab, use [notebooks/05_cloud_training.ipynb](../notebooks/05_cloud_training.ipynb): it installs the package, rebuilds the manifest, splits, masks and preprocessed images from the attached INbreast dataset (a few minutes, so nothing derived has to be uploaded), and trains with `--max-minutes`. To continue in a later session, add the previous version's output as an input and set `PREVIOUS_RUNS`.
+On Kaggle, use [notebooks/05_kaggle_training.ipynb](../notebooks/05_kaggle_training.ipynb). Its first cell holds the experiment: the folds (`FOLDS`), the time shared by them (`MAX_MINUTES`) and any other `mammo-seg train` options (`TRAIN_OPTIONS`). The next cells install the package, rebuild the manifest, splits, masks and preprocessed images from the attached INbreast dataset (a few minutes, so nothing derived has to be uploaded), train each fold with the time that is left, and print the best epoch of each. To continue in a later session, save a version, add its output as an input and set `PREVIOUS_RUNS`; a fold with a `last.pt` is resumed and a finished fold returns at once. The notebook asks for `--device cuda`, so a notebook without a GPU stops with an error.
 
 ### What has and has not been tried
 
 - Tested on the CPU with synthetic images (CI does the same): the loop, checkpoints, stopping, resuming and the command, including a run through the command that learns a synthetic mass.
 - Run once on the real data on a laptop CPU for one epoch with a small encoder, which wrote the checkpoints and the history. That machine has 4 GB of RAM and cannot hold a batch of 4 full-size images, so the default batch size is untested here.
-- **Not tried:** a GPU, mixed precision, the CUDA PyTorch builds, a real Kaggle or Colab session, and the memory use and speed of the default model on a GPU. Results of real training runs are not reported here yet.
+- Run once on Kaggle on a T4 GPU, fold 0, with the default settings (batch size 4, mixed precision): about 24 s per epoch, no memory problem, and early stopping after 25 epochs (the best was epoch 10). **The validation scores are poor**: the training loss fell from 1.57 to 0.60, but the validation Dice over all images stayed at or below 0.045 and, on the images with a mass, at or below 0.17 although the sensitivity there reached 0.89, so most masses were found but the predicted areas were far too large. Every epoch also had a false-alarm rate of 1.000, which counts an image without a mass as soon as one pixel is predicted on it; such an image scores a Dice of 0, which is what holds the all-images Dice down. A second run gave the same numbers to four decimals, so a run is reproducible.
+- Three checks on that fold, to find out why:
+  - **Training longer does not help.** A run of 60 epochs without early stopping, choosing the epoch by the Dice on images with a mass, stayed between 0.02 and 0.08 on those images from epoch 12 to 60 (the best, 0.165 at epoch 10, was a single high value). The training loss flattened between 0.5 and 0.6.
+  - **It is not overfitting.** Scored by the validation code on the training images of the last epoch, the images with a mass had a Dice of 0.095 (validation 0.073), a sensitivity of 0.95 and a precision of 0.054: the predicted area is about 18 times the mass, on data the model had trained on for 60 epochs.
+  - **The code can fit masks.** Trained on four training images with a mass, the same model and loss reached a Dice of 0.84 to 0.93 on each of them in 200 steps. This shows that the data path, the model and the loss work together; it does not show that the masks are placed correctly, because a network can also memorize wrong masks. On these four images, the masses cover 0.2 to 0.4 % of the image.
+  - A training loss that stays high is not by itself a sign of underfitting here: on an image without a mass the Dice part is `S / (S + 1)` for `S`, the sum of the predicted probabilities over about 800,000 pixels, so it is close to 1 unless the background probabilities are tiny. At step 200 of the four-image check the loss was still 1.17 while the Dice was above 0.84.
+- The cause is not known. Open candidates: the loss (a Dice per image on masses that cover a few tenths of a percent of the image), the full-image protocol itself (lesion-centred crops are the usual choice for such small masses), and the learning rate. The alignment of images and masks on the real data has not been checked by looking at overlays of the masks.
+- **Not tried:** the other folds, other GPUs, the held-out test set, and any change of settings.
 
 ## Next steps
 
-- A first real training run on a GPU, to set the batch size and see what the metrics look like.
+- Make the model fit and generalize on one fold before cross-validation or any search for settings: try the changes in the candidates above one at a time, and check by eye that the masks lie on the lesions in the preprocessed images.
 - Evaluation on the held-out test set, with the simple baselines the protocol calls for.
