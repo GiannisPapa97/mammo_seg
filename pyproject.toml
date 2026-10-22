@@ -20,11 +20,13 @@ dependencies = [
 # indexes, so it is an extra: choose exactly one. Locally and in CI:
 # `uv sync --extra cpu`. On a GPU machine: `--extra cu126` (older drivers) or
 # `--extra cu130`. On Kaggle or Colab, where a GPU build of PyTorch is already
-# installed, install the package without an extra and the existing one is used.
+# installed, use `pip install ".[cloud]"`: it adds the model library and leaves the
+# installed PyTorch alone.
 [project.optional-dependencies]
-cpu = ["torch>=2.2", "torchvision>=0.17"]
-cu126 = ["torch>=2.2", "torchvision>=0.17"]
-cu130 = ["torch>=2.2", "torchvision>=0.17"]
+cpu = ["torch>=2.2", "torchvision>=0.17", "segmentation-models-pytorch>=0.5"]
+cu126 = ["torch>=2.2", "torchvision>=0.17", "segmentation-models-pytorch>=0.5"]
+cu130 = ["torch>=2.2", "torchvision>=0.17", "segmentation-models-pytorch>=0.5"]
+cloud = ["torch>=2.2", "torchvision>=0.17", "segmentation-models-pytorch>=0.5"]
 
 [dependency-groups]
 dev = [
@@ -46,7 +48,14 @@ build-backend = "hatchling.build"
 packages = ["src/mammo_seg"]
 
 [tool.uv]
-conflicts = [[{ extra = "cpu" }, { extra = "cu126" }, { extra = "cu130" }]]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu126" },
+        { extra = "cu130" },
+        { extra = "cloud" },
+    ],
+]
 
 [tool.uv.sources]
 torch = [
@@ -79,6 +88,8 @@ explicit = true
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--cov --strict-markers --import-mode=importlib"
+# Delete the temporary files of passing tests; some tests write model checkpoints.
+tmp_path_retention_policy = "failed"
 markers = [
     "integration: runs a full workflow end to end on synthetic data",
     "slow: takes more than about 30 seconds",
@@ -108,7 +119,16 @@ files = ["src", "tests"]
 explicit_package_bases = true
 mypy_path = "src"
 
-# scikit-learn, SciPy and torchvision ship no type information
+# These libraries ship no type information
 [[tool.mypy.overrides]]
-module = ["sklearn", "sklearn.*", "scipy", "scipy.*", "torchvision", "torchvision.*"]
+module = [
+    "sklearn",
+    "sklearn.*",
+    "scipy",
+    "scipy.*",
+    "torchvision",
+    "torchvision.*",
+    "segmentation_models_pytorch",
+    "segmentation_models_pytorch.*",
+]
 ignore_missing_imports = true

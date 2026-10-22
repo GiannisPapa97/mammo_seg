@@ -60,7 +60,38 @@ The INbreast masses range from about 3,000 to 750,000 pixels at native size, and
 
 A small convolutional network trained on two real positive images (at a quarter of the resolution) brings the loss from 1.63 to 0.36 in 400 steps, and the Dice on those images from 0 to 0.83: the loss drives the model to find the masses. On a batch of one positive and three negative images, a weaker network first settles on predicting nothing, which scores the three negatives perfectly. That is why training balances positive and negative images (the sampler in `loaders.py`) and the summary reports images with a mass separately.
 
+## 3. The model
+
+`build_model(ModelSettings())` builds a network from `segmentation_models_pytorch` (smp): an architecture on top of an encoder, with one input channel and one output channel of raw logits (apply a sigmoid for probabilities). The default is a U-Net with a ResNet-34 encoder pretrained on ImageNet: 24.4 million parameters, and a forward pass on the full 1024 x 800 canvas takes about 2.6 s for one image on a laptop CPU.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `architecture` | `unet` | `unet`, `unetplusplus`, `deeplabv3`, `deeplabv3plus` or `fpn` |
+| `encoder` | `resnet34` | Any smp encoder name, for example `resnet18`, `efficientnet-b0` or a timm model as `tu-<name>` |
+| `encoder_weights` | `imagenet` | `imagenet` for pretrained weights, `None` for random ones |
+
+smp adapts the pretrained first layer to a grayscale image by summing its weights over the colour channels. The input sides do not have to divide by 32 (smp handles it), but training and validation use the 1024 x 800 canvas and inference pads to a multiple of 32 (`pad_to_multiple`), like the data loaders.
+
+### Free cloud GPUs (Kaggle, Colab)
+
+The model code runs the same on a CPU and on a GPU, so tests and smoke runs happen locally and real training on a cloud notebook:
+
+1. **Install without touching PyTorch.** The notebook comes with a GPU build of PyTorch. Install the package with `pip install ".[cloud]"` (see the README); a simulated install into an environment that already had PyTorch left it untouched.
+2. **The device** is chosen by `resolve_device()`: `auto` picks the GPU. Asking for `cuda` on a notebook without a GPU is an error, not a silent run on the CPU.
+3. **Pretrained weights need internet the first time.** They come from the Hugging Face hub and are cached (by default in `~/.cache/huggingface`, or where `HF_HOME` points). On Kaggle, internet is off by default: enable it in the notebook settings. For a notebook without internet, build the model once somewhere with internet, upload that cache folder as a Kaggle dataset and set `HF_HOME` to it (not tried on Kaggle). A failed download raises an error that says so. Models rebuilt from a checkpoint never download anything.
+4. **Sessions end without warning**, so training state goes into checkpoints (below), saved into the notebook's output folder and resumed in the next session.
+
+### Checkpoints
+
+`save_checkpoint(path, model, model_settings, preprocessing_settings, training_state, metadata)` writes one file with the weights, the model settings, the preprocessing settings the model was trained with, and optionally the training state (optimizer, epoch, best Dice) and metadata (such as the fold). It is built for the cloud:
+
+- **Atomic:** it writes to a temporary file and renames it, so a session that dies during a save leaves the last good checkpoint in place.
+- **Portable:** it loads onto a CPU whatever device it was saved from (`load_checkpoint(path, device="cpu")`), so a model trained on a GPU can be used on a laptop.
+- **Safe:** it is loaded with `weights_only=True`, so a checkpoint downloaded from somewhere cannot run code. Settings are stored as JSON text and everything else is tensors and plain values.
+- **Self-contained:** `load_model(path, device)` rebuilds the network without downloading pretrained weights, puts it in evaluation mode and returns it with the preprocessing settings that images must be given at inference.
+
+A checkpoint is about 100 MB of weights for the default model, and about 300 MB with the Adam optimizer state.
+
 ## Next steps
 
-- The model: a U-Net with a pretrained encoder and one input channel.
-- The training loop: training per fold, validation with these metrics, checkpoints with resuming, and the device choice.
+- The training loop: training per fold with the sampler and augmentation, validation with the metrics above, checkpoints with resuming (best and last), logging, and a command to run it on a few images locally and on a cloud GPU.
