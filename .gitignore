@@ -34,4 +34,5 @@ coverage.xml
 *.ckpt
 /mlruns/
 /outputs/
+/runs/
 *.db

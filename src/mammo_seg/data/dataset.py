@@ -22,6 +22,7 @@ from torch.utils.data import Dataset
 from mammo_seg.data.masks import read_mask
 from mammo_seg.data.preprocess_dataset import (
     RECORD_FILE,
+    PreprocessingRecord,
     check_settings,
     image_path,
     processed_mask_path,
@@ -34,6 +35,9 @@ from mammo_seg.data.preprocessing import PreprocessingSettings, normalize_intens
 # multiple of 32, which a U-Net needs.
 DEFAULT_CANVAS = (1024, 800)
 
+# A U-Net halves the image five times, so its input sides must divide by 32.
+DEFAULT_MULTIPLE = 32
+
 Transform = Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
 
 
@@ -42,6 +46,18 @@ class Sample(TypedDict):
     mask: torch.Tensor  # float32, [1, H, W], 1 on a mass
     valid: torch.Tensor  # bool, [1, H, W], false on the padding
     file_id: str
+
+
+def canvas_of(
+    record: PreprocessingRecord, multiple: int = DEFAULT_MULTIPLE
+) -> tuple[int, int]:
+    """The smallest canvas, with sides divisible by ``multiple``, that holds every
+    preprocessed image of the record: (1024, 800) for INbreast at size 1024."""
+    if not record.images:
+        raise ValueError("the preprocessed data has no images")
+    rows = max(params.shape[0] for params in record.images.values())
+    cols = max(params.shape[1] for params in record.images.values())
+    return -(-rows // multiple) * multiple, -(-cols // multiple) * multiple
 
 
 def pad_to(tensor: torch.Tensor, canvas: tuple[int, int]) -> torch.Tensor:
