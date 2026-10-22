@@ -17,18 +17,30 @@ a pass of validation:
 
 The model with the best value of the selection metric is the one to keep; by
 default that is the mean Dice over all validation images.
+
+Built for free cloud GPUs, where a session ends after a few hours or without
+warning. With an output folder, every epoch writes ``last.pt`` (weights, optimizer,
+schedule, history: all that is needed to continue) and, when the selection metric
+improved, ``best.pt`` (weights only), both atomically (see ``checkpoint.py``).
+``resume=True`` continues from ``last.pt`` and gives the same result as a run that
+was never interrupted, because the random draws of an epoch depend only on the seed
+and the epoch number. A run stops by itself when the selection metric has not
+improved for ``patience`` epochs, or, before a session is cut off, when another
+epoch would not fit in ``time_limit_minutes``; the last finished epoch is on disk
+either way.
 """
 
 import json
 import logging
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from torch import nn
 from torch.optim import Adam
@@ -43,13 +55,16 @@ from mammo_seg.data.preprocessing import PreprocessingSettings
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile
 from mammo_seg.device import resolve_device
+from mammo_seg.engine.checkpoint import load_checkpoint, save_checkpoint
 from mammo_seg.engine.losses import DiceBCELoss
-from mammo_seg.engine.metrics import Summary, image_scores, summarize
+from mammo_seg.engine.metrics import GroupSummary, Summary, image_scores, summarize
 from mammo_seg.engine.model import ModelSettings, build_model
 
 logger = logging.getLogger(__name__)
 
 HISTORY_FILE = "history.jsonl"
+LAST_FILE = "last.pt"  # everything needed to resume
+BEST_FILE = "best.pt"  # the weights of the best epoch
 GROUPS = ("with_mass", "without_mass", "all_images")
 METRICS = ("dice", "iou", "precision", "sensitivity")
 # "<group>.<metric>", for example "with_mass.dice"; higher is better for all.
@@ -72,6 +87,9 @@ class TrainingSettings:
     # The validation metric that decides which model is the best; see
     # SELECTION_METRICS. All metrics are logged every epoch whatever this is.
     selection_metric: str = DEFAULT_SELECTION_METRIC
+    # Stop when the selection metric has not improved for this many epochs; None
+    # always trains for all the epochs.
+    patience: Annotated[int, Field(ge=1)] | None = 15
     seed: int = 0
     num_workers: Annotated[int, Field(ge=0)] = 0
 
@@ -98,11 +116,20 @@ class EpochRecord:
     selection_value: float  # NaN when the selection metric is undefined
 
 
+# Settings that may differ between the sessions of one run: they do not change what
+# is learned (mixed precision only changes the arithmetic).
+_FREE_ON_RESUME = ("num_workers", "amp")
+_SETTINGS = TypeAdapter(TrainingSettings)
+
+StopReason = Literal["finished", "early_stopping", "time_limit"]
+
+
 @dataclass(frozen=True)
 class TrainingResult:
-    history: tuple[EpochRecord, ...]
+    history: tuple[EpochRecord, ...]  # every epoch, including those before a resume
     best_epoch: int | None  # None if the selection metric was never defined
     best_value: float
+    stop_reason: StopReason
 
 
 def selection_value(summary: Summary, name: str) -> float:
@@ -204,6 +231,139 @@ def describe(record: EpochRecord, selection_metric: str) -> str:
     )
 
 
+def record_from_dict(data: Mapping[str, Any]) -> EpochRecord:
+    """Rebuild an epoch record from ``dataclasses.asdict`` of it."""
+    validation = data["validation"]
+    return EpochRecord(
+        **{
+            **data,
+            "validation": Summary(
+                **{name: GroupSummary(**validation[name]) for name in GROUPS}
+            ),
+        }
+    )
+
+
+@dataclass
+class _Progress:
+    """What the loop remembers between epochs; saved in ``last.pt``."""
+
+    history: list[EpochRecord]
+    best_epoch: int | None = None
+    best_value: float = -math.inf
+    epochs_since_best: int = 0
+
+
+def _differences(saved: TrainingSettings, given: TrainingSettings) -> list[str]:
+    before, after = asdict(saved), asdict(given)
+    return [
+        f"{key}: {before[key]} -> {after[key]}"
+        for key in before
+        if key not in _FREE_ON_RESUME and before[key] != after[key]
+    ]
+
+
+def _restore(
+    path: Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
+    scaler: torch.amp.GradScaler,
+    settings: TrainingSettings,
+    model_settings: ModelSettings,
+    preprocessing_settings: PreprocessingSettings,
+    metadata: Mapping[str, Any],
+    device: torch.device,
+) -> _Progress:
+    """Load ``last.pt`` into the model and the optimizer, schedule and scaler.
+
+    Raises ValueError if there is no checkpoint, or if it was made with other
+    settings, so a run is never continued with something else than it started with.
+    """
+    if not path.is_file():
+        raise ValueError(f"nothing to resume: {path} does not exist")
+    checkpoint = load_checkpoint(path, device)
+    state = checkpoint.training_state
+    if state is None:
+        raise ValueError(f"{path.name} has no training state to resume from")
+    if checkpoint.model_settings != model_settings:
+        raise ValueError(
+            f"{path.name} holds {checkpoint.model_settings}, not {model_settings}"
+        )
+    if checkpoint.preprocessing_settings != preprocessing_settings:
+        raise ValueError(
+            f"{path.name} was trained on images preprocessed with "
+            f"{checkpoint.preprocessing_settings}, not {preprocessing_settings}"
+        )
+    for key, value in metadata.items():
+        if checkpoint.metadata.get(key) != value:
+            raise ValueError(
+                f"{path.name} has {key} = {checkpoint.metadata.get(key)}, not {value}"
+            )
+    saved = _SETTINGS.validate_json(checkpoint.metadata["training_settings"])
+    if differences := _differences(saved, settings):
+        raise ValueError(
+            f"{path.name} was trained with other settings ({'; '.join(differences)})"
+        )
+    model.load_state_dict(checkpoint.model_state)
+    optimizer.load_state_dict(state["optimizer"])
+    scheduler.load_state_dict(state["scheduler"])
+    scaler.load_state_dict(state["scaler"])
+    return _Progress(
+        history=[record_from_dict(item) for item in state["history"]],
+        best_epoch=state["best_epoch"],
+        best_value=state["best_value"],
+        epochs_since_best=state["epochs_since_best"],
+    )
+
+
+def _save(
+    output_dir: Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: CosineAnnealingLR,
+    scaler: torch.amp.GradScaler,
+    progress: _Progress,
+    improved: bool,
+    settings: TrainingSettings,
+    model_settings: ModelSettings,
+    preprocessing_settings: PreprocessingSettings,
+    metadata: Mapping[str, Any],
+) -> None:
+    """Write ``last.pt``, and ``best.pt`` too when this epoch was the best so far."""
+    epoch = len(progress.history)
+    common = {
+        **metadata,
+        "training_settings": _SETTINGS.dump_json(settings).decode(),
+        "selection_metric": settings.selection_metric,
+    }
+    state = {
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict(),
+        "best_epoch": progress.best_epoch,
+        "best_value": progress.best_value,
+        "epochs_since_best": progress.epochs_since_best,
+        "history": [asdict(record) for record in progress.history],
+    }
+    save_checkpoint(
+        output_dir / LAST_FILE,
+        model,
+        model_settings,
+        preprocessing_settings,
+        training_state=state,
+        metadata={**common, "epoch": epoch},
+    )
+    if improved:
+        save_checkpoint(
+            output_dir / BEST_FILE,
+            model,
+            model_settings,
+            preprocessing_settings,
+            metadata={**common, "epoch": epoch, "value": progress.best_value},
+        )
+
+
 def fit(
     model: nn.Module,
     train_loader: DataLoader[Sample],
@@ -211,28 +371,86 @@ def fit(
     settings: TrainingSettings,
     device: torch.device,
     output_dir: Path | None = None,
+    *,
+    model_settings: ModelSettings,
+    preprocessing_settings: PreprocessingSettings,
+    metadata: Mapping[str, Any] | None = None,
+    resume: bool = False,
+    time_limit_minutes: float | None = None,
 ) -> TrainingResult:
-    """Train ``model`` for ``settings.epochs`` epochs, validating after each.
+    """Train ``model`` for up to ``settings.epochs`` epochs, validating after each.
 
-    The model is moved to ``device``. If ``output_dir`` is given, one JSON line per
-    epoch is written to ``history.jsonl`` there.
+    The model is moved to ``device``. With an ``output_dir``, ``history.jsonl``,
+    ``last.pt`` and ``best.pt`` are written there after every epoch. ``metadata``
+    (plain values such as the fold) is stored in the checkpoints, and a resume
+    refuses a checkpoint whose values differ.
+
+    ``resume=True`` continues from ``output_dir/last.pt`` and raises ValueError if
+    there is none or it was made with other settings (the number of workers and
+    mixed precision may differ). Training stops early after ``settings.patience``
+    epochs without improvement, and stops before an epoch that would not end within
+    ``time_limit_minutes`` of the start of this call; at least one epoch is always
+    run, so repeated sessions make progress.
     """
+    if resume and output_dir is None:
+        raise ValueError("an output folder is needed to resume")
+    metadata = metadata or {}
     model.to(device)
     amp = settings.amp and device.type == "cuda"
     loss_function = DiceBCELoss()
     optimizer = Adam(model.parameters(), lr=settings.learning_rate)
     scheduler = CosineAnnealingLR(optimizer, T_max=settings.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
+    progress = _Progress(history=[])
+    if resume:
+        assert output_dir is not None
+        progress = _restore(
+            output_dir / LAST_FILE,
+            model,
+            optimizer,
+            scheduler,
+            scaler,
+            settings,
+            model_settings,
+            preprocessing_settings,
+            metadata,
+            device,
+        )
+        logger.info("resuming after epoch %d", len(progress.history))
     history_file = None
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         history_file = output_dir / HISTORY_FILE
-        history_file.write_text("")
+        history_file.write_text(
+            "".join(record_to_json(record) + "\n" for record in progress.history)
+        )
 
-    history: list[EpochRecord] = []
-    best_epoch, best_value = None, -math.inf
-    for epoch in range(1, settings.epochs + 1):
+    session_start = time.monotonic()
+    slowest = 0.0  # seconds of the slowest epoch of this session
+    stop_reason: StopReason = "finished"
+    for epoch in range(len(progress.history) + 1, settings.epochs + 1):
+        if settings.patience is not None and (
+            progress.epochs_since_best >= settings.patience
+        ):
+            logger.info(
+                "early stopping: no improvement for %d epochs", settings.patience
+            )
+            stop_reason = "early_stopping"
+            break
+        if (
+            time_limit_minutes is not None
+            and slowest > 0
+            and time.monotonic() - session_start + slowest > time_limit_minutes * 60
+        ):
+            logger.info("stopping before epoch %d: the time limit is near", epoch)
+            stop_reason = "time_limit"
+            break
         started = time.monotonic()
+        # The draws of an epoch depend only on the seed and the epoch, so a resumed
+        # run repeats an uninterrupted one.
+        torch.manual_seed(settings.seed + epoch)
+        if train_loader.generator is not None:
+            train_loader.generator.manual_seed(settings.seed + epoch)
         learning_rate = optimizer.param_groups[0]["lr"]
         train_loss = train_one_epoch(
             model, train_loader, loss_function, optimizer, scaler, device, amp
@@ -248,17 +466,37 @@ def fit(
             validation=summary,
             selection_value=value,
         )
-        history.append(record)
+        slowest = max(slowest, record.seconds)
+        progress.history.append(record)
+        improved = value > progress.best_value  # False for NaN: undefined never wins
+        if improved:
+            progress.best_epoch, progress.best_value = epoch, value
+            progress.epochs_since_best = 0
+        else:
+            progress.epochs_since_best += 1
         logger.info(describe(record, settings.selection_metric))
+        if output_dir is not None:
+            _save(
+                output_dir,
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                progress,
+                improved,
+                settings,
+                model_settings,
+                preprocessing_settings,
+                metadata,
+            )
         if history_file is not None:
             with history_file.open("a") as stream:
                 stream.write(record_to_json(record) + "\n")
-        if value > best_value:  # False for NaN, so an undefined value never wins
-            best_epoch, best_value = epoch, value
     return TrainingResult(
-        history=tuple(history),
-        best_epoch=best_epoch,
-        best_value=best_value if best_epoch is not None else math.nan,
+        history=tuple(progress.history),
+        best_epoch=progress.best_epoch,
+        best_value=progress.best_value if progress.best_epoch is not None else math.nan,
+        stop_reason=stop_reason,
     )
 
 
@@ -274,12 +512,15 @@ def train_fold(
     device: torch.device | None = None,
     output_dir: Path | None = None,
     canvas: tuple[int, int] = DEFAULT_CANVAS,
+    resume: bool = False,
+    time_limit_minutes: float | None = None,
 ) -> TrainingResult:
     """Train on every fold but ``fold`` of the splits and validate on ``fold``.
 
-    ``device`` defaults to ``resolve_device()``. Raises ValueError for a fold
-    outside the splits, splits made from another manifest, or preprocessed data
-    made with other settings.
+    ``device`` defaults to ``resolve_device()``. ``resume`` and
+    ``time_limit_minutes`` are those of ``fit``. Raises ValueError for a fold
+    outside the splits, splits made from another manifest, preprocessed data
+    made with other settings, or a checkpoint that cannot be resumed.
     """
     device = device or resolve_device()
     ids = fold_ids(manifest, splits_file, fold)
@@ -314,4 +555,16 @@ def train_fold(
         len(train_data),
         len(validation_data),
     )
-    return fit(model, train_loader, validation_loader, settings, device, output_dir)
+    return fit(
+        model,
+        train_loader,
+        validation_loader,
+        settings,
+        device,
+        output_dir,
+        model_settings=model_settings,
+        preprocessing_settings=preprocessing_settings,
+        metadata={"fold": fold},
+        resume=resume,
+        time_limit_minutes=time_limit_minutes,
+    )

@@ -3,6 +3,7 @@ import logging
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -12,16 +13,21 @@ from tests.data.preprocessed import SETTINGS, write_preprocessed_for
 
 from mammo_seg.data.dataset import MammogramDataset
 from mammo_seg.data.loaders import evaluation_loader, training_loader
+from mammo_seg.data.preprocessing import PreprocessingSettings
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile, create_splits_file
 from mammo_seg.engine import train as train_module
+from mammo_seg.engine.checkpoint import load_checkpoint, load_model
 from mammo_seg.engine.losses import DiceBCELoss
 from mammo_seg.engine.metrics import GroupSummary, Summary
 from mammo_seg.engine.model import ModelSettings, build_model
 from mammo_seg.engine.train import (
+    BEST_FILE,
     HISTORY_FILE,
+    LAST_FILE,
     SELECTION_METRICS,
     EpochRecord,
+    TrainingResult,
     TrainingSettings,
     describe,
     fit,
@@ -51,8 +57,9 @@ class Data:
 def data(tmp_path: Path) -> Data:
     """Eight patients (four with a mass), two images each, split into two folds."""
     manifest = make_manifest(4, 4, per_patient=2)
-    write_preprocessed_for(tmp_path, SETTINGS, manifest)
-    return Data(manifest, create_splits_file(manifest, 2), tmp_path)
+    directory = tmp_path / "preprocessed"
+    write_preprocessed_for(directory, SETTINGS, manifest)
+    return Data(manifest, create_splits_file(manifest, 2), directory)
 
 
 def loaders(
@@ -244,28 +251,44 @@ def test_the_log_line_names_the_epoch_and_the_selection_metric() -> None:
 # --- fit ---
 
 
+def run_fit(
+    data: Data,
+    settings: TrainingSettings = FAST,
+    output_dir: Path | None = None,
+    **options: Any,
+) -> TrainingResult:
+    torch.manual_seed(0)
+    train_loader, validation_loader = loaders(data, settings)
+    return fit(
+        build_model(TINY),
+        train_loader,
+        validation_loader,
+        settings,
+        CPU,
+        output_dir,
+        model_settings=options.pop("model_settings", TINY),
+        preprocessing_settings=options.pop("preprocessing_settings", SETTINGS),
+        **options,
+    )
+
+
 def test_fit_runs_the_epochs_validates_and_writes_the_history(
     data: Data, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    torch.manual_seed(0)
-    train_loader, validation_loader = loaders(data)
     output = tmp_path / "run"
     with caplog.at_level(logging.INFO, logger="mammo_seg.engine.train"):
-        result = fit(
-            build_model(TINY), train_loader, validation_loader, FAST, CPU, output
-        )
+        result = run_fit(data, output_dir=output)
     assert [r.epoch for r in result.history] == [1, 2, 3]
     assert all(r.validation.all_images.images == 16 for r in result.history)
     assert all(math.isfinite(r.train_loss) for r in result.history)
     lines = (output / HISTORY_FILE).read_text().splitlines()
     assert [json.loads(line)["epoch"] for line in lines] == [1, 2, 3]
     assert len([m for m in caplog.messages if m.startswith("epoch ")]) == 3
+    assert result.stop_reason == "finished"
 
 
 def test_the_learning_rate_follows_a_cosine_down_to_zero(data: Data) -> None:
-    train_loader, validation_loader = loaders(data)
-    settings = replace(FAST, epochs=4, learning_rate=1e-3)
-    result = fit(build_model(TINY), train_loader, validation_loader, settings, CPU)
+    result = run_fit(data, replace(FAST, epochs=4, learning_rate=1e-3))
     rates = [r.learning_rate for r in result.history]
     assert rates[0] == 1e-3
     assert rates == sorted(rates, reverse=True)
@@ -279,16 +302,31 @@ def test_fit_without_an_output_folder_writes_nothing(
     work = tmp_path / "cwd"
     work.mkdir()
     monkeypatch.chdir(work)
-    train_loader, validation_loader = loaders(data)
-    fit(build_model(TINY), train_loader, validation_loader, FAST, CPU)
+    run_fit(data)
     assert list(work.iterdir()) == []
 
 
 def test_amp_requested_on_the_cpu_is_ignored(data: Data) -> None:
-    train_loader, validation_loader = loaders(data)
-    settings = replace(FAST, epochs=1, amp=True)
-    result = fit(build_model(TINY), train_loader, validation_loader, settings, CPU)
+    result = run_fit(data, replace(FAST, epochs=1, amp=True))
     assert math.isfinite(result.history[0].train_loss)
+
+
+def test_fit_accepts_a_loader_without_a_generator(data: Data) -> None:
+    _, validation_loader = loaders(data)
+    plain = torch.utils.data.DataLoader(
+        validation_loader.dataset, batch_size=2, drop_last=True
+    )
+    assert plain.generator is None
+    result = fit(
+        build_model(TINY),
+        plain,
+        validation_loader,
+        replace(FAST, epochs=1),
+        CPU,
+        model_settings=TINY,
+        preprocessing_settings=SETTINGS,
+    )
+    assert len(result.history) == 1
 
 
 def fake_validation(monkeypatch: pytest.MonkeyPatch, summaries: list[Summary]) -> None:
@@ -300,8 +338,7 @@ def test_the_best_epoch_is_the_one_with_the_highest_selection_value(
     data: Data, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_validation(monkeypatch, [summary(0.2), summary(0.5), summary(0.4)])
-    train_loader, validation_loader = loaders(data)
-    result = fit(build_model(TINY), train_loader, validation_loader, FAST, CPU)
+    result = run_fit(data)
     assert result.best_epoch == 2 and result.best_value == 0.5
     assert [r.selection_value for r in result.history] == [0.2, 0.5, 0.4]
 
@@ -317,9 +354,7 @@ def test_the_selection_metric_decides_which_epoch_is_the_best(
             summary(0.7),
         ],
     )
-    train_loader, validation_loader = loaders(data)
-    settings = replace(FAST, selection_metric="with_mass.dice")
-    result = fit(build_model(TINY), train_loader, validation_loader, settings, CPU)
+    result = run_fit(data, replace(FAST, selection_metric="with_mass.dice"))
     assert result.best_epoch == 2 and result.best_value == 0.3
 
 
@@ -328,8 +363,7 @@ def test_an_undefined_selection_value_never_wins(
 ) -> None:
     nan = replace(summary(0.5), all_images=group(math.nan))
     fake_validation(monkeypatch, [nan, summary(0.3), nan])
-    train_loader, validation_loader = loaders(data)
-    result = fit(build_model(TINY), train_loader, validation_loader, FAST, CPU)
+    result = run_fit(data)
     assert result.best_epoch == 2 and result.best_value == 0.3
 
 
@@ -338,9 +372,204 @@ def test_without_any_defined_value_there_is_no_best_epoch(
 ) -> None:
     nan = replace(summary(0.5), all_images=group(math.nan))
     fake_validation(monkeypatch, [nan, nan, nan])
-    train_loader, validation_loader = loaders(data)
-    result = fit(build_model(TINY), train_loader, validation_loader, FAST, CPU)
+    result = run_fit(data, replace(FAST, patience=None))
     assert result.best_epoch is None and math.isnan(result.best_value)
+
+
+# --- checkpoints ---
+
+
+def test_last_and_best_checkpoints_are_written(
+    data: Data, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_validation(monkeypatch, [summary(0.2), summary(0.5), summary(0.4)])
+    output = tmp_path / "out"
+    run_fit(data, output_dir=output, metadata={"fold": 3})
+    last, best = (
+        load_checkpoint(output / LAST_FILE),
+        load_checkpoint(output / BEST_FILE),
+    )
+    assert last.metadata["epoch"] == 3 and last.metadata["fold"] == 3
+    assert last.training_state is not None
+    assert last.training_state["best_epoch"] == 2
+    assert [item["epoch"] for item in last.training_state["history"]] == [1, 2, 3]
+    assert best.training_state is None  # the weights only
+    assert best.metadata["epoch"] == 2 and best.metadata["value"] == 0.5
+    assert best.metadata["selection_metric"] == "all_images.dice"
+    assert best.model_settings == TINY and best.preprocessing_settings == SETTINGS
+    assert not all(
+        torch.equal(best.model_state[key], last.model_state[key])
+        for key in best.model_state
+    )
+    assert sorted(path.name for path in output.iterdir()) == [
+        BEST_FILE,
+        HISTORY_FILE,
+        LAST_FILE,
+    ]
+
+
+def test_the_best_checkpoint_is_kept_when_later_epochs_are_worse(
+    data: Data, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_validation(monkeypatch, [summary(0.9), summary(0.5), summary(0.4)])
+    run_fit(data, output_dir=tmp_path)
+    assert load_checkpoint(tmp_path / BEST_FILE).metadata["epoch"] == 1
+    assert load_checkpoint(tmp_path / LAST_FILE).metadata["epoch"] == 3
+
+
+def test_the_best_model_is_usable_for_inference(data: Data, tmp_path: Path) -> None:
+    run_fit(data, output_dir=tmp_path)
+    model, preprocessing = load_model(tmp_path / BEST_FILE, CPU)
+    assert preprocessing == SETTINGS and not model.training
+    with torch.no_grad():
+        assert model(torch.rand(1, 1, 64, 64)).shape == (1, 1, 64, 64)
+
+
+# --- stopping ---
+
+
+def test_training_stops_after_the_patience_without_improvement(
+    data: Data, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_validation(monkeypatch, [summary(0.5), summary(0.4), summary(0.3)])
+    result = run_fit(data, replace(FAST, epochs=6, patience=2))
+    assert result.stop_reason == "early_stopping"
+    assert [r.epoch for r in result.history] == [1, 2, 3]
+    assert result.best_epoch == 1
+
+
+def test_an_improvement_restarts_the_patience(
+    data: Data, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_validation(
+        monkeypatch, [summary(0.5), summary(0.4), summary(0.6), summary(0.5)] * 2
+    )
+    result = run_fit(data, replace(FAST, epochs=4, patience=2))
+    assert result.stop_reason == "finished" and len(result.history) == 4
+
+
+def test_without_patience_every_epoch_is_run(
+    data: Data, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_validation(monkeypatch, [summary(0.5 - 0.1 * i) for i in range(4)])
+    result = run_fit(data, replace(FAST, epochs=4, patience=None))
+    assert result.stop_reason == "finished" and len(result.history) == 4
+
+
+def test_the_time_limit_stops_before_an_epoch_that_would_not_fit(
+    data: Data,
+) -> None:
+    result = run_fit(data, time_limit_minutes=1e-9)
+    assert result.stop_reason == "time_limit"
+    assert [r.epoch for r in result.history] == [1]  # one epoch always runs
+
+
+def test_a_generous_time_limit_changes_nothing(data: Data) -> None:
+    result = run_fit(data, time_limit_minutes=60)
+    assert result.stop_reason == "finished" and len(result.history) == 3
+
+
+# --- resuming ---
+
+
+def same(record: EpochRecord) -> str:
+    """A record as text without its duration: NaN, unlike None, is never equal."""
+    return record_to_json(replace(record, seconds=0.0))
+
+
+def test_a_stopped_run_resumed_equals_a_run_that_was_never_stopped(
+    data: Data, tmp_path: Path
+) -> None:
+    settings = replace(FAST, epochs=4)
+    whole = run_fit(data, settings, tmp_path / "whole")
+    first = run_fit(data, settings, tmp_path / "split", time_limit_minutes=1e-9)
+    assert first.stop_reason == "time_limit" and len(first.history) == 1
+    second = run_fit(data, settings, tmp_path / "split", resume=True)
+    assert second.stop_reason == "finished"
+    assert [r.epoch for r in second.history] == [1, 2, 3, 4]
+    assert [same(r) for r in second.history] == [same(r) for r in whole.history]
+    assert second.best_epoch == whole.best_epoch
+    for name in (LAST_FILE, BEST_FILE):
+        a, b = (load_checkpoint(tmp_path / d / name) for d in ("whole", "split"))
+        assert all(
+            torch.equal(a.model_state[k], b.model_state[k]) for k in a.model_state
+        )
+    lines = (tmp_path / "split" / HISTORY_FILE).read_text().splitlines()
+    assert [json.loads(line)["epoch"] for line in lines] == [1, 2, 3, 4]
+
+
+def test_resuming_a_finished_run_does_nothing(data: Data, tmp_path: Path) -> None:
+    done = run_fit(data, output_dir=tmp_path)
+    before = (tmp_path / LAST_FILE).read_bytes()
+    again = run_fit(data, output_dir=tmp_path, resume=True)
+    assert [same(r) for r in again.history] == [same(r) for r in done.history]
+    assert again.stop_reason == "finished"
+    assert (tmp_path / LAST_FILE).read_bytes() == before
+
+
+def test_resuming_a_run_stopped_early_stays_stopped(
+    data: Data, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = replace(FAST, epochs=6, patience=2)
+    fake_validation(monkeypatch, [summary(0.5), summary(0.4), summary(0.3)])
+    run_fit(data, settings, tmp_path)
+    again = run_fit(data, settings, tmp_path, resume=True)
+    assert again.stop_reason == "early_stopping" and len(again.history) == 3
+
+
+def test_workers_and_mixed_precision_may_change_between_sessions(
+    data: Data, tmp_path: Path
+) -> None:
+    run_fit(data, FAST, tmp_path, time_limit_minutes=1e-9)
+    changed = replace(FAST, amp=True, num_workers=1)
+    result = run_fit(data, changed, tmp_path, resume=True)
+    assert len(result.history) == 3
+
+
+def test_resuming_needs_an_output_folder(data: Data) -> None:
+    with pytest.raises(ValueError, match="output folder"):
+        run_fit(data, resume=True)
+
+
+def test_resuming_without_a_checkpoint_is_an_error(data: Data, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="nothing to resume"):
+        run_fit(data, output_dir=tmp_path, resume=True)
+
+
+def test_a_checkpoint_without_training_state_cannot_be_resumed(
+    data: Data, tmp_path: Path
+) -> None:
+    run_fit(data, output_dir=tmp_path)
+    (tmp_path / BEST_FILE).replace(tmp_path / LAST_FILE)  # the weights only
+    with pytest.raises(ValueError, match="no training state"):
+        run_fit(data, output_dir=tmp_path, resume=True)
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"settings": replace(FAST, epochs=5)}, "epochs: 3 -> 5"),
+        ({"settings": replace(FAST, learning_rate=1e-2)}, "learning_rate"),
+        ({"settings": replace(FAST, selection_metric="with_mass.dice")}, "selection"),
+        (
+            {
+                "model_settings": ModelSettings(
+                    architecture="fpn", encoder=TINY.encoder, encoder_weights=None
+                )
+            },
+            "holds",
+        ),
+        ({"preprocessing_settings": PreprocessingSettings(size=32)}, "preprocessed"),
+        ({"metadata": {"fold": 1}}, "fold = 0, not 1"),
+    ],
+)
+def test_a_run_is_only_resumed_with_the_settings_it_started_with(
+    data: Data, tmp_path: Path, options: dict[str, Any], message: str
+) -> None:
+    run_fit(data, FAST, tmp_path, metadata={"fold": 0}, time_limit_minutes=1e-9)
+    options = {"settings": FAST, "metadata": {"fold": 0}, **options}
+    with pytest.raises(ValueError, match=message):
+        run_fit(data, output_dir=tmp_path, resume=True, **options)
 
 
 # --- a fold ---
