@@ -22,6 +22,9 @@ dependencies = [
 # `--extra cu130`. On Kaggle or Colab, where a GPU build of PyTorch is already
 # installed, use `pip install ".[cloud]"`: it adds the model library and leaves the
 # installed PyTorch alone.
+[project.scripts]
+mammo-seg = "mammo_seg.cli:main"
+
 [project.optional-dependencies]
 cpu = ["torch>=2.2", "torchvision>=0.17", "segmentation-models-pytorch>=0.5"]
 cu126 = ["torch>=2.2", "torchvision>=0.17", "segmentation-models-pytorch>=0.5"]

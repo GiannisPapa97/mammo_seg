@@ -1,6 +1,6 @@
 # Training
 
-How the model is trained and judged. The data side (manifest, splits, masks, preprocessing, dataset and loaders) is in [data-pipeline.md](data-pipeline.md). This document grows as the model and the training loop are added.
+How the model is trained and judged. The data side (manifest, splits, masks, preprocessing, dataset and loaders) is in [data-pipeline.md](data-pipeline.md).
 
 Code: `src/mammo_seg/engine/`.
 
@@ -92,6 +92,65 @@ The model code runs the same on a CPU and on a GPU, so tests and smoke runs happ
 
 A checkpoint is about 100 MB of weights for the default model, and about 300 MB with the Adam optimizer state.
 
+## 4. The training loop
+
+`train_fold(manifest, splits_file, preprocessed_dir, fold, ...)` (`engine/train.py`) trains on every fold of the patient-level splits but one and validates on that one. Each epoch is a pass of training and a pass of validation:
+
+- **Training** draws batches balanced between images with and without a mass (the sampler of `loaders.py`, 50% by default), applies the augmentation, and minimizes the Dice + cross-entropy loss with Adam. The learning rate starts at 1e-4 and follows a cosine curve down to 0 over the epochs.
+- **Validation** runs on every image of the validation fold once and computes the metrics of section 1 for images with a mass, without one, and all images. All of them are logged every epoch.
+- **Mixed precision** (float16) is used on a CUDA GPU only: the network runs in it, the loss in float32, with a gradient scaler. On the CPU it is off whatever is asked.
+- **The best epoch** is the one with the highest value of the selection metric, by default the mean Dice over all validation images (`all_images.dice`). Another metric can be chosen, for example `with_mass.dice`; an undefined value (NaN) never wins. Note that on this dataset a model that predicts nothing already scores well on all images, because most images have no mass, so look at the images with a mass too.
+
+| Setting | Default |
+|---|---|
+| `epochs` | 60 |
+| `batch_size` | 4 |
+| `learning_rate` | 1e-4 (cosine decay) |
+| `positive_fraction` | 0.5 |
+| `patience` | 15 epochs without improvement, then stop (`0` or `None` never stops early) |
+| `selection_metric` | `all_images.dice` |
+| `amp` | on (GPU only) |
+| `seed` | 0 |
+
+### What a run writes
+
+In `<output-dir>/fold_<k>/`:
+
+| File | Content |
+|---|---|
+| `history.jsonl` | One JSON line per epoch: learning rate, training loss, duration, all validation metrics (`null` where undefined) |
+| `last.pt` | After every epoch: weights, optimizer, learning-rate schedule, history; all that is needed to continue |
+| `best.pt` | The weights of the best epoch, with the model and preprocessing settings; load it with `load_model` |
+
+Both are written atomically (section 3).
+
+### Stopping and resuming
+
+A run stops when the epochs are done, when the selection metric has not improved for `patience` epochs, or, with `--max-minutes`, before an epoch that would not end within that time, so a session with a time limit ends with a saved state instead of a lost epoch. At least one epoch always runs, so repeated sessions make progress.
+
+`--resume` continues from `last.pt`. It refuses a checkpoint made with other training settings, model, preprocessing or fold (only the number of workers and mixed precision may differ), so a run is never continued with something else than it started with. The random draws of an epoch (the sampler and the augmentation) depend only on the seed and the epoch number, so a stopped and resumed run gives the same history and weights as one that was never stopped; a test checks this on the CPU.
+
+## 5. Running it
+
+The `mammo-seg` command (installed with the package) runs the data steps and the training; the options are listed by `mammo-seg train --help`.
+
+```bash
+mammo-seg train --fold 0 --output-dir runs                   # a GPU if there is one, else the CPU
+mammo-seg train --fold 0 --output-dir runs --resume          # continue after a stop
+mammo-seg train --epochs 30 --selection-metric with_mass.dice --device cuda
+```
+
+The data steps are the same commands as `python -m mammo_seg.data.<step>`: `mammo-seg manifest`, `splits`, `masks` and `preprocess`. Training reads the preprocessing settings and the canvas from the preprocessed data, so they cannot disagree with it.
+
+On Kaggle or Colab, use [notebooks/05_cloud_training.ipynb](../notebooks/05_cloud_training.ipynb): it installs the package, rebuilds the manifest, splits, masks and preprocessed images from the attached INbreast dataset (a few minutes, so nothing derived has to be uploaded), and trains with `--max-minutes`. To continue in a later session, add the previous version's output as an input and set `PREVIOUS_RUNS`.
+
+### What has and has not been tried
+
+- Tested on the CPU with synthetic images (CI does the same): the loop, checkpoints, stopping, resuming and the command, including a run through the command that learns a synthetic mass.
+- Run once on the real data on a laptop CPU for one epoch with a small encoder, which wrote the checkpoints and the history. That machine has 4 GB of RAM and cannot hold a batch of 4 full-size images, so the default batch size is untested here.
+- **Not tried:** a GPU, mixed precision, the CUDA PyTorch builds, a real Kaggle or Colab session, and the memory use and speed of the default model on a GPU. Results of real training runs are not reported here yet.
+
 ## Next steps
 
-- The training loop: training per fold with the sampler and augmentation, validation with the metrics above, checkpoints with resuming (best and last), logging, and a command to run it on a few images locally and on a cloud GPU.
+- A first real training run on a GPU, to set the batch size and see what the metrics look like.
+- Evaluation on the held-out test set, with the simple baselines the protocol calls for.

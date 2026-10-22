@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -6,7 +7,8 @@ import torch
 from tests.data.preprocessed import CANVAS, SETTINGS, WIDTHS, write_preprocessed
 from torch.utils.data import DataLoader
 
-from mammo_seg.data.dataset import DEFAULT_CANVAS, MammogramDataset, pad_to
+from mammo_seg.data.dataset import DEFAULT_CANVAS, MammogramDataset, canvas_of, pad_to
+from mammo_seg.data.preprocess_dataset import RECORD_FILE, read_record
 from mammo_seg.data.preprocessing import PreprocessingSettings
 
 
@@ -24,6 +26,24 @@ def dataset(directory: Path, **kwargs: object) -> MammogramDataset:
         kwargs.pop("canvas", CANVAS),  # type: ignore[arg-type]
         **kwargs,  # type: ignore[arg-type]
     )
+
+
+# --- the canvas ---
+
+
+def test_the_canvas_holds_the_largest_image_with_sides_divisible_by_32(
+    directory: Path,
+) -> None:
+    record = read_record(directory / RECORD_FILE)  # images 64 x (30, 48, 20)
+    assert canvas_of(record) == (64, 64)
+    assert canvas_of(record, multiple=10) == (70, 50)
+    assert canvas_of(record, multiple=1) == (64, 48)
+
+
+def test_a_record_without_images_has_no_canvas(directory: Path) -> None:
+    record = read_record(directory / RECORD_FILE)
+    with pytest.raises(ValueError, match="no images"):
+        canvas_of(replace(record, images={}))
 
 
 # --- padding ---

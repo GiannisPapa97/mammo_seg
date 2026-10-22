@@ -17,12 +17,10 @@ import torch
 from torch.nn import functional
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-from mammo_seg.data.dataset import MammogramDataset, Sample
+from mammo_seg.data.dataset import DEFAULT_MULTIPLE, MammogramDataset, Sample
 from mammo_seg.data.schema import Manifest
 
 DEFAULT_POSITIVE_FRACTION = 0.5
-# A U-Net halves the image five times, so its input sides must divide by 32.
-DEFAULT_MULTIPLE = 32
 
 
 def has_mass_of(manifest: Manifest, file_ids: Sequence[str]) -> list[bool]:
