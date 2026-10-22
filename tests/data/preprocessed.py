@@ -1,5 +1,6 @@
 """Helpers that write a small synthetic preprocessed dataset; no real data."""
 
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,7 @@ from mammo_seg.data.preprocessing import (
     PreprocessingSettings,
     PreprocessParams,
 )
+from mammo_seg.data.schema import Manifest
 
 SETTINGS = PreprocessingSettings(size=64)
 CANVAS = (64, 48)
@@ -25,13 +27,18 @@ CANVAS = (64, 48)
 WIDTHS = {"00000001": 30, "00000002": 48, "00000003": 20}
 
 
-def write_preprocessed(directory: Path, settings: PreprocessingSettings) -> None:
-    """Small preprocessed images: a ramp of intensities, a mass mask on image 1."""
+def write_preprocessed(
+    directory: Path,
+    settings: PreprocessingSettings,
+    widths: Mapping[str, int] = WIDTHS,
+    with_mass: Collection[str] = ("00000001",),
+) -> None:
+    """Small preprocessed images: a ramp of intensities, a mass mask where asked."""
     params = {}
-    for file_id, width in WIDTHS.items():
+    for file_id, width in widths.items():
         pixels = np.tile(np.linspace(0, 4095, width, dtype=np.uint16), (64, 1))
         mask = np.zeros((64, width), dtype=np.uint8)
-        if file_id == "00000001":
+        if file_id in with_mass:
             mask[10:20, 5:15] = 1
         write_image(pixels, image_path(directory, file_id))
         write_mask(mask, processed_mask_path(directory, file_id))
@@ -43,3 +50,16 @@ def write_preprocessed(directory: Path, settings: PreprocessingSettings) -> None
         )
     record = PreprocessingRecord(version=1, settings=settings, images=params)
     write_record(record, directory / RECORD_FILE)
+
+
+def write_preprocessed_for(
+    directory: Path, settings: PreprocessingSettings, manifest: Manifest
+) -> None:
+    """Preprocessed images for every image of a manifest, with a mass mask on those
+    that have a mass in it."""
+    write_preprocessed(
+        directory,
+        settings,
+        widths={image.file_id: 40 for image in manifest.images},
+        with_mass={image.file_id for image in manifest.images if image.has_mass},
+    )
