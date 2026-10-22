@@ -4,7 +4,7 @@ A reproducible PyTorch framework for segmentation of mammography images, startin
 
 > **Research use only.** This project is not a medical device and its output must not be used for clinical decisions.
 
-**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset, patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. The metrics and the loss are defined ([docs/training.md](docs/training.md)); the model and checkpoints are in place; the training loop is not implemented yet.
+**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset, patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. The metrics, the loss, the model, checkpoints and the training loop are in place ([docs/training.md](docs/training.md)); no results on a GPU or on the real data are reported yet.
 
 ## Development
 
@@ -74,6 +74,19 @@ uv run python -m mammo_seg.data.preprocess_dataset
 ```
 
 The PyTorch dataset and loaders read these files; see [docs/data-pipeline.md](docs/data-pipeline.md) for the formats, the checks and how to load a fold.
+
+The installed `mammo-seg` command runs the same steps (`mammo-seg manifest`, `splits`, `masks`, `preprocess`) and training.
+
+## Training
+
+Train on one cross-validation fold (a GPU if there is one, else the CPU), writing checkpoints and a history to `runs/fold_0/`:
+
+```bash
+uv run mammo-seg train --fold 0
+uv run mammo-seg train --fold 0 --resume    # continue after a stop
+```
+
+On Kaggle or Colab use [notebooks/05_cloud_training.ipynb](notebooks/05_cloud_training.ipynb), which rebuilds the data from the attached dataset and stops cleanly before the session limit. See [docs/training.md](docs/training.md) for the settings, the files a run writes, and what has been tried.
 
 ## License
 
