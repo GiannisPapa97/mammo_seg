@@ -1,15 +1,14 @@
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, get_args
 
 import pytest
 from tests.data.manifests import make_manifest
-from tests.data.preprocessed import SETTINGS, write_preprocessed_for
+from tests.data.preprocessed import SETTINGS
+from tests.project import Project, make_project
 
 from mammo_seg import cli
 from mammo_seg.data.manifest import write_manifest
-from mammo_seg.data.splits import create_splits_file, write_splits
 from mammo_seg.engine import train as train_module
 from mammo_seg.engine.model import Architecture
 from mammo_seg.engine.train import SELECTION_METRICS, TrainingResult
@@ -17,49 +16,9 @@ from mammo_seg.engine.train import SELECTION_METRICS, TrainingResult
 TINY = ["--encoder", "tu-mobilenetv3_small_050", "--encoder-weights", "none"]
 
 
-@dataclass
-class Project:
-    """Synthetic files at the paths that ``mammo-seg train`` takes."""
-
-    manifest: Path
-    splits: Path
-    preprocessed: Path
-    output: Path
-
-    def train_args(self, *extra: str) -> list[str]:
-        return [
-            "train",
-            "--manifest",
-            str(self.manifest),
-            "--splits",
-            str(self.splits),
-            "--preprocessed-dir",
-            str(self.preprocessed),
-            "--output-dir",
-            str(self.output),
-            "--device",
-            "cpu",
-            "--batch-size",
-            "2",
-            "--samples-per-epoch",
-            "4",
-            *extra,
-        ]
-
-
 @pytest.fixture
 def project(tmp_path: Path) -> Project:
-    manifest = make_manifest(4, 4, per_patient=2)
-    files = Project(
-        manifest=tmp_path / "manifest.json",
-        splits=tmp_path / "splits.json",
-        preprocessed=tmp_path / "preprocessed",
-        output=tmp_path / "runs",
-    )
-    write_manifest(manifest, files.manifest)
-    write_splits(create_splits_file(manifest, 2), files.splits)
-    write_preprocessed_for(files.preprocessed, SETTINGS, manifest)
-    return files
+    return make_project(tmp_path)
 
 
 def result(**overrides: Any) -> TrainingResult:

@@ -32,14 +32,21 @@ def write_preprocessed(
     settings: PreprocessingSettings,
     widths: Mapping[str, int] = WIDTHS,
     with_mass: Collection[str] = ("00000001",),
+    visible_mass: bool = False,
 ) -> None:
-    """Small preprocessed images: a ramp of intensities, a mass mask where asked."""
+    """Small preprocessed images: a ramp of intensities, a mass mask where asked.
+
+    With ``visible_mass`` the mass is also a bright patch in the image, so that a
+    model can learn to tell images with a mass from those without.
+    """
     params = {}
     for file_id, width in widths.items():
         pixels = np.tile(np.linspace(0, 4095, width, dtype=np.uint16), (64, 1))
         mask = np.zeros((64, width), dtype=np.uint8)
         if file_id in with_mass:
             mask[10:20, 5:15] = 1
+            if visible_mass:
+                pixels[10:20, 5:15] = 4095
         write_image(pixels, image_path(directory, file_id))
         write_mask(mask, processed_mask_path(directory, file_id))
         params[file_id] = PreprocessParams(
@@ -62,4 +69,5 @@ def write_preprocessed_for(
         settings,
         widths={image.file_id: 40 for image in manifest.images},
         with_mass={image.file_id for image in manifest.images if image.has_mass},
+        visible_mass=True,
     )
