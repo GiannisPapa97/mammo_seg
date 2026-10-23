@@ -1,9 +1,12 @@
 """Random augmentation of training samples, applied to image and mask together.
 
-Built on torchvision ``transforms.v2``: geometric changes (rotation, scale, shift
-and an optional random crop) move the image and its mask the same way, with the
-mask resampled by nearest neighbour so it stays 0/1. Intensity changes
-(brightness, contrast, gamma, noise) only touch the image.
+Built on torchvision ``transforms.v2``: geometric changes (rotation, scale and
+shift) move the image and its mask the same way, with the mask resampled by
+nearest neighbour so it stays 0/1. Intensity changes (brightness, contrast, gamma,
+noise) only touch the image. An optional crop then cuts a patch out of both. The
+masses cover well under 1% of an image, so a uniformly random patch seldom holds
+one: with probability ``crop_mass_fraction`` the patch is placed around a randomly
+chosen mass pixel (when the image still has one after the geometric changes).
 
 There are no flips: preprocessing puts every chest wall on the left, and flipping
 would show the model breasts it never sees at inference.
@@ -17,6 +20,7 @@ from typing import Annotated
 import torch
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
+from torch.nn import functional
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
@@ -32,10 +36,13 @@ class AugmentationSettings:
     contrast: Annotated[float, Field(ge=0, lt=1)] = 0.1
     gamma: Annotated[float, Field(ge=0, lt=1)] = 0.2  # exponent in 1 +- gamma
     noise: Annotated[float, Field(ge=0)] = 0.01  # standard deviation
-    # A random patch of (height, width) instead of the whole image; off by default.
+    # A patch of (height, width) instead of the whole image; off by default.
     crop_size: (
         tuple[Annotated[int, Field(ge=1)], Annotated[int, Field(ge=1)]] | None
     ) = None
+    # Chance that the patch contains a mass pixel, for an image that has a mass;
+    # otherwise the patch is placed at random. Used with ``crop_size`` only.
+    crop_mass_fraction: Annotated[float, Field(ge=0, le=1)] = 0.5
 
 
 class Augmentation:
@@ -57,8 +64,6 @@ class Augmentation:
                     interpolation=v2.InterpolationMode.BILINEAR,
                 )
             )
-        if settings.crop_size is not None:
-            geometric.append(v2.RandomCrop(settings.crop_size, pad_if_needed=True))
         intensity: list[v2.Transform] = []
         if settings.brightness or settings.contrast:
             intensity.append(
@@ -86,4 +91,29 @@ class Augmentation:
             exponent = low + (high - low) * torch.rand(()).item()
             changed = changed.clamp(min=0) ** exponent
         result = changed.as_subclass(torch.Tensor).clamp(0.0, 1.0)
-        return result, moved_mask.as_subclass(torch.Tensor)
+        mask_result = moved_mask.as_subclass(torch.Tensor)
+        if self.settings.crop_size is not None:
+            return self._crop(result, mask_result)
+        return result, mask_result
+
+    def _crop(
+        self, image: torch.Tensor, mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """A patch of ``crop_size``; an image smaller than the patch is zero-padded."""
+        assert self.settings.crop_size is not None
+        rows, cols = self.settings.crop_size
+        height, width = image.shape[-2:]
+        if height < rows or width < cols:
+            padding = (0, max(cols - width, 0), 0, max(rows - height, 0))
+            image, mask = functional.pad(image, padding), functional.pad(mask, padding)
+            height, width = image.shape[-2:]
+        top = int(torch.randint(0, height - rows + 1, ()))
+        left = int(torch.randint(0, width - cols + 1, ()))
+        masses = torch.nonzero(mask[0] > 0.5)
+        if len(masses) and torch.rand(()).item() < self.settings.crop_mass_fraction:
+            row, col = masses[int(torch.randint(0, len(masses), ()))].tolist()
+            # The chosen pixel lands at a random place of the patch.
+            top = min(max(row - int(torch.randint(0, rows, ())), 0), height - rows)
+            left = min(max(col - int(torch.randint(0, cols, ())), 0), width - cols)
+        window = (slice(None), slice(top, top + rows), slice(left, left + cols))
+        return image[window], mask[window]

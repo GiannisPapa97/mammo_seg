@@ -331,7 +331,8 @@ Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every
 | `brightness`, `contrast` | 0.1 | factor 1 +- 0.1, image only |
 | `gamma` | 0.2 | exponent 1 +- 0.2, image only |
 | `noise` | 0.01 | Gaussian, standard deviation, image only |
-| `crop_size` | none | a random patch of this size instead of the whole image (not lesion-aware) |
+| `crop_size` | none | a patch of this size instead of the whole image |
+| `crop_mass_fraction` | 0.5 | for an image that has a mass, the chance that the patch is placed around a randomly chosen mass pixel (at a random place of the patch); otherwise the patch is placed at random. A random patch seldom holds a mass that covers well under 1% of the image |
 
 The mask is resampled by nearest neighbour and stays 0/1. There are no flips: every chest wall is on the left after preprocessing, and flipping would show the model breasts it never sees at inference. On real images, the mask area after augmentation is 0.86 to 1.18 times the original, as the 10% scaling implies.
 

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from tests.data.manifests import make_manifest
 from tests.data.preprocessed import SETTINGS, write_preprocessed_for
 
+from mammo_seg.data.augmentation import AugmentationSettings
 from mammo_seg.data.dataset import MammogramDataset
 from mammo_seg.data.loaders import evaluation_loader, training_loader
 from mammo_seg.data.preprocessing import PreprocessingSettings
@@ -643,3 +644,68 @@ def test_a_fold_outside_the_splits_is_an_error(data: Data) -> None:
             device=CPU,
             canvas=CANVAS,
         )
+
+
+# --- crops ---
+
+CROPS = AugmentationSettings(crop_size=(32, 32))
+
+
+def test_training_canvas_is_the_crop_rounded_up_to_what_the_network_needs() -> None:
+    canvas = (1024, 800)
+    assert train_module._training_canvas(AugmentationSettings(), canvas) == canvas
+    assert train_module._training_canvas(CROPS, canvas) == (32, 32)
+    odd = AugmentationSettings(crop_size=(500, 513))
+    assert train_module._training_canvas(odd, canvas) == (512, 544)
+
+
+def test_a_fold_trains_on_crops_and_validates_on_whole_images(
+    data: Data, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+    real_training_loader = training_loader
+
+    def spy(dataset: MammogramDataset, *args: Any, **kwargs: Any) -> Any:
+        seen["canvas"] = dataset.canvas
+        loader = real_training_loader(dataset, *args, **kwargs)
+        seen["batch"] = next(iter(loader))["image"].shape
+        return loader
+
+    monkeypatch.setattr(train_module, "training_loader", spy)
+    result = train_fold(
+        data.manifest,
+        data.splits_file,
+        data.directory,
+        fold=0,
+        settings=replace(FAST, epochs=1),
+        model_settings=TINY,
+        preprocessing_settings=SETTINGS,
+        augmentation_settings=CROPS,
+        device=CPU,
+        canvas=CANVAS,
+    )
+    assert seen["canvas"] == (32, 32) and seen["batch"] == (2, 1, 32, 32)
+    assert result.history[0].validation.all_images.images == 8
+
+
+def test_a_run_is_not_resumed_with_other_crops(data: Data, tmp_path: Path) -> None:
+    def run(augmentation: AugmentationSettings, **options: Any) -> TrainingResult:
+        return train_fold(
+            data.manifest,
+            data.splits_file,
+            data.directory,
+            fold=0,
+            settings=FAST,
+            model_settings=TINY,
+            preprocessing_settings=SETTINGS,
+            augmentation_settings=augmentation,
+            device=CPU,
+            canvas=CANVAS,
+            output_dir=tmp_path / "run",
+            **options,
+        )
+
+    run(CROPS, time_limit_minutes=1e-9)
+    with pytest.raises(ValueError, match="augmentation"):
+        run(AugmentationSettings(crop_size=(48, 48)), resume=True)
+    assert run(CROPS, resume=True).stop_reason == "finished"

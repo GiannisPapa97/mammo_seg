@@ -50,6 +50,11 @@ def test_the_defaults_are_the_agreed_training_settings() -> None:
     assert args.output_dir == Path("runs")
 
 
+def test_training_on_whole_images_is_the_default() -> None:
+    args = cli.build_parser().parse_args(["train"])
+    assert args.crop_size is None and args.crop_mass_fraction == 0.5
+
+
 def test_mixed_precision_can_be_switched_off() -> None:
     assert not cli.build_parser().parse_args(["train", "--no-amp"]).amp
 
@@ -144,7 +149,7 @@ def test_the_options_become_settings(
     )
     assert code == 0
     ((args, kwargs),) = calls
-    _, _, directory, fold, settings, model_settings, preprocessing = args
+    _, _, directory, fold, settings, model_settings, preprocessing, crops = args
     assert directory == project.preprocessed and fold == 1
     assert (settings.epochs, settings.batch_size) == (7, 2)
     assert settings.patience is None and not settings.amp
@@ -154,12 +159,37 @@ def test_the_options_become_settings(
         "fpn",
         None,
     )
-    assert preprocessing == SETTINGS
+    assert preprocessing == SETTINGS and crops.crop_size is None
     assert kwargs["output_dir"] == project.output / "fold_1"
     assert kwargs["canvas"] == (64, 64)
     assert kwargs["resume"] and kwargs["time_limit_minutes"] == 90
     assert kwargs["device"].type == "cpu"
     assert "Training ended after 0 epochs (finished)" in capsys.readouterr().out
+
+
+def test_the_crop_options_become_augmentation_settings(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def fake(*args: Any, **kwargs: Any) -> TrainingResult:
+        calls.append(args)
+        return result()
+
+    monkeypatch.setattr(train_module, "train_fold", fake)
+    options = ["--crop-size", "32", "--crop-mass-fraction", "0.75", *TINY]
+    assert cli.main(project.train_args(*options)) == 0
+    augmentation = calls[0][7]
+    assert (
+        augmentation.crop_size == (32, 32) and augmentation.crop_mass_fraction == 0.75
+    )
+
+
+def test_a_crop_size_of_zero_is_an_error(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(project.train_args("--crop-size", "0", *TINY)) == 1
+    assert capsys.readouterr().err.startswith("error:")
 
 
 def test_the_summary_names_the_best_epoch_and_how_to_continue(
