@@ -7,7 +7,11 @@ a pass of validation:
 - training draws batches balanced between images with and without a mass, or, with
   a ``BatchComposition``, batches of a fixed make-up of patches
   (``loaders.training_loader``) and minimizes ``DiceBCELoss`` with Adam, with a
-  learning rate that follows a cosine curve down to 0 over the epochs
+  learning rate that follows a cosine curve down to 0 over the epochs. The loss
+  counts every pixel, the padding too, as background: no mass can be there, and
+  the network sees padding at inference as well, so it learns that flat 0 is not a
+  mass. Without it, the flat background was left untrained and validation predicted
+  masses all over it
 - validation runs on every image of the validation fold once and computes the
   metrics of ``metrics.py`` for images with a mass, without one, and all images
 - mixed precision (float16 on the GPU) is used for the network only; the loss is
@@ -183,16 +187,20 @@ def train_one_epoch(
 ) -> float:
     """One pass over the training loader; returns the mean loss per batch.
 
-    Raises ValueError if the loader gives no batch (fewer images than a batch).
+    The loss counts every pixel of a sample, the padding included, as the mask says
+    (background there). Raises ValueError if the loader gives no batch (fewer images
+    than a batch).
     """
     model.train()
     total, batches = 0.0, 0
     for batch in loader:
-        images, masks, valid = _to_device(batch, device)
+        images, masks, _ = _to_device(batch, device)
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device.type, enabled=amp):
             logits = model(images)
-        loss = loss_function(logits.float(), masks, valid)
+        # The padding counts, as background; only the metrics leave it out.
+        everywhere = torch.ones_like(masks, dtype=torch.bool)
+        loss = loss_function(logits.float(), masks, everywhere)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()

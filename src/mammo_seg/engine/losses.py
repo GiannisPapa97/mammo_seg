@@ -3,8 +3,9 @@
 Masses cover about 1% of a positive image and none of a negative one. The Dice
 part measures the overlap of prediction and mask per image, so it is not swamped
 by the background; the cross-entropy part gives a smooth signal on every pixel,
-which keeps training stable early on. Pixels where ``valid`` is false (the
-padding) count in neither.
+which keeps training stable early on. Pixels where ``valid`` is false count in
+neither. Training passes every pixel as valid, so the padding counts as background
+(see ``train.py``); the metrics leave the padding out.
 
 The Dice part is computed per image and averaged, like the metric. A smoothing
 term keeps it defined on images without a mass: predicting nothing there gives a

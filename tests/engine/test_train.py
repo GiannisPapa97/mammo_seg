@@ -191,6 +191,50 @@ def test_training_an_epoch_changes_the_weights_and_returns_a_finite_loss(
     assert any(changed)
 
 
+class Constant(torch.nn.Module):
+    """Predicts the same logit everywhere; a learning rate of 0 keeps it there."""
+
+    def __init__(self, logit: float) -> None:
+        super().__init__()
+        self.logit = torch.nn.Parameter(torch.tensor(logit))
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return torch.zeros_like(images) + self.logit
+
+
+def test_the_training_loss_counts_the_padding_as_background(data: Data) -> None:
+    model = Constant(2.0)  # predicts a mass everywhere, the padding too
+    train_loader, _ = loaders(data)
+    loss_function = DiceBCELoss()
+
+    def mean_loss(everywhere: bool) -> float:
+        assert train_loader.generator is not None
+        train_loader.generator.manual_seed(0)
+        losses = []
+        with torch.no_grad():
+            for batch in train_loader:
+                valid = batch["valid"]
+                if everywhere:
+                    valid = torch.ones_like(valid)
+                logits = model(batch["image"])
+                losses.append(float(loss_function(logits, batch["mask"], valid)))
+        return sum(losses) / len(losses)
+
+    assert train_loader.generator is not None
+    train_loader.generator.manual_seed(0)
+    loss = train_one_epoch(
+        model,
+        train_loader,
+        loss_function,
+        torch.optim.SGD(model.parameters(), lr=0.0),
+        torch.amp.GradScaler("cpu", enabled=False),
+        CPU,
+        amp=False,
+    )
+    assert loss == pytest.approx(mean_loss(everywhere=True))
+    assert loss != pytest.approx(mean_loss(everywhere=False))  # the data has padding
+
+
 def test_an_epoch_without_a_batch_is_an_error(data: Data) -> None:
     train_loader, _ = loaders(data, replace(FAST, batch_size=2, samples_per_epoch=1))
     with pytest.raises(ValueError, match="no batch"):
