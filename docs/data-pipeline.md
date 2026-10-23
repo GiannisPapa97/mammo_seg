@@ -315,7 +315,7 @@ PyTorch is an extra that picks its build (see the README): `uv sync --extra cpu`
 | `valid` | bool `[1, 1024, 800]`, true on the image, false on the padding |
 | `file_id` | the image id |
 
-Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every preprocessed image is 1024 px high and 276 to 784 px wide; 800 is the next multiple of 32, which a U-Net needs, and the chest wall is on the left, so padding only adds background next to the breast. An image wider than the canvas is an error, not a silent crop. Losses and metrics should only count pixels where `valid` is true, or the padding counts as correctly predicted background.
+Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every preprocessed image is 1024 px high and 276 to 784 px wide; 800 is the next multiple of 32, which a U-Net needs, and the chest wall is on the left, so padding only adds background next to the breast. An image wider than the canvas is an error, not a silent crop. Losses and metrics should only count pixels where `valid` is true, or the padding counts as correctly predicted background. A crop of an image smaller than the crop (262 of the 410 images are narrower than 512 px) is padded the same way: the crop is smaller on that side and the dataset pads it, so its padding is not valid either.
 
 ### Splits
 
@@ -333,14 +333,22 @@ Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every
 | `brightness`, `contrast` | 0.1 | factor 1 +- 0.1, image only |
 | `gamma` | 0.2 | exponent 1 +- 0.2, image only |
 | `noise` | 0.01 | Gaussian, standard deviation, image only |
-| `crop_size` | none | a patch of this size instead of the whole image |
+| `crop_size` | none | a patch of this size instead of the whole image; on a side where the image is smaller, the patch is the whole image on that side |
 | `crop_mass_fraction` | 0.5 | for an image that has a mass, the chance that the patch is placed around a randomly chosen mass pixel (at a random place of the patch); otherwise the patch is placed at random. A random patch seldom holds a mass that covers well under 1% of the image |
+
+With a crop, a patch can also be asked for by kind (`Augmentation(image, mask, kind)`, or `dataset[(index, kind)]`):
+
+- `"mass"`: the patch contains at least one mass pixel, placed at a random place of the patch. If the geometric changes pushed the mass out of the image, the patch is placed at random.
+- `"negative"`: the patch contains no mass pixel and is centred on a random breast pixel (brighter than 0.05 on the 0..1 scale, which is the preprocessing threshold of 100 of 4095 rounded up), so it is not just background. A patch that holds a mass pixel is drawn again, up to 20 times; if none is free (a mass that fills the breast), the one with the fewest mass pixels is used.
+
+`crop_mass_fraction` only applies without a kind.
 
 The mask is resampled by nearest neighbour and stays 0/1. There are no flips: every chest wall is on the left after preprocessing, and flipping would show the model breasts it never sees at inference. On real images, the mask area after augmentation is 0.86 to 1.18 times the original, as the 10% scaling implies.
 
 ### Loaders and the imbalance
 
 - `training_loader(dataset, manifest, batch_size, positive_fraction=0.5, samples_per_epoch=None, num_workers=0, seed=0)` draws with PyTorch's `WeightedRandomSampler` so that about `positive_fraction` of the images have a mass; 26% of the INbreast images do. It draws with replacement, so an epoch has a fixed length, by default the number of training images. `positive_fraction=None` turns the sampler off and uses every image once per epoch. The last incomplete batch is dropped.
+- With `composition=BatchComposition(mass, negative_from_mass_images, negative_from_normal_images)` (4, 2, 2 by default) `training_loader` builds every batch from that many patches of each kind instead: `TypedBatchSampler` draws, with replacement, images with a mass for the first two kinds and images without one for the third, and the dataset cuts a patch of the kind from each. A batch then always has the same make-up, where the random draw above gives anywhere from 1 to 7 images with a mass in a batch of 8. It needs the crop, `batch_size` must equal the size of the composition, an epoch has `samples_per_epoch // batch_size` batches, and `positive_fraction` is not used. The images are drawn from the training images only, so the splits are unchanged.
 - `evaluation_loader(dataset, batch_size)` uses every image once, in order, with no sampler and no augmentation: validation and test metrics must reflect the real distribution.
 - Everything random runs from one seeded `torch.Generator`, which also seeds the workers, so a run can be repeated.
 

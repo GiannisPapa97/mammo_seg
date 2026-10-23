@@ -98,6 +98,7 @@ A checkpoint is about 100 MB of weights for the default model, and about 300 MB 
 
 - **Training** draws batches balanced between images with and without a mass (the sampler of `loaders.py`, 50% by default), applies the augmentation, and minimizes the Dice + cross-entropy loss with Adam. The learning rate starts at 1e-4 and follows a cosine curve down to 0 over the epochs.
 - **Crops** (`--crop-size N`, off by default): training can use square patches of N pixels instead of whole images, half of them (`--crop-mass-fraction`) placed around a mass when the image has one (see the augmentation in [data-pipeline.md](data-pipeline.md)). The training canvas is then the crop size rounded up to a multiple of 32, so batches are cheaper and a larger `--batch-size` fits. Validation always uses whole images, so crop and whole-image runs are scored the same way. The crop settings are saved in the checkpoint, and a run cannot be resumed with other ones.
+- **Batch composition** (`--batch-composition MASS NEG_FROM_MASS_IMAGES NEG_FROM_NORMAL_IMAGES`, for example `4 2 2`, needs `--crop-size`): instead of drawing images at random, every batch has that many patches that contain a mass, negative patches (no mass) from images with a mass, and negative patches from images without one. The batch size is their sum, `--positive-fraction` is not used, and the composition is saved in the checkpoint like the other settings, so a run cannot be resumed with another one. Patch kinds are described in [data-pipeline.md](data-pipeline.md). Implemented and tested on synthetic data; not yet run on the real data.
 - **Validation** runs on every image of the validation fold once and computes the metrics of section 1 for images with a mass, without one, and all images. All of them are logged every epoch.
 - **Mixed precision** (float16) is used on a CUDA GPU only: the network runs in it, the loss in float32, with a gradient scaler. On the CPU it is off whatever is asked.
 - **The best epoch** is the one with the highest value of the selection metric, by default the mean Dice over all validation images (`all_images.dice`). Another metric can be chosen, for example `with_mass.dice`; an undefined value (NaN) never wins. Note that on this dataset a model that predicts nothing already scores well on all images, because most images have no mass, so look at the images with a mass too.
@@ -108,6 +109,7 @@ A checkpoint is about 100 MB of weights for the default model, and about 300 MB 
 | `batch_size` | 4 |
 | `learning_rate` | 1e-4 (cosine decay) |
 | `positive_fraction` | 0.5 |
+| `composition` | none (4 2 2 with `--batch-composition 4 2 2`) |
 | `patience` | 15 epochs without improvement, then stop (`0` or `None` never stops early) |
 | `selection_metric` | `all_images.dice` |
 | `amp` | on (GPU only) |
@@ -187,6 +189,8 @@ Each probability map is turned into a prediction under every combination of a **
   | 4 | 0.81 | 0.05 | 0.92 | 0.75 |
   | mean | about 0.56 | about 0.28 | about 0.68 | |
 
+- **What a batch of that run holds** (one epoch of fold 0, 512 draws, seed 0, measured afterwards): 3.9 images with a mass per batch of 8 on average, from 1 to 7. 86% of the 251 patches of images with a mass contained at least one mass pixel (a mass fills a median of 1.2% of such a patch), none of the 261 patches of images without one did, so 42% of all patches had a mass pixel, and mass pixels were 1.1% of all patch pixels (0.27% in the whole dataset).
+- **Padding was counted as valid in these runs.** 262 of the 410 preprocessed images are narrower than 512 px, so most crops were padded with zeros on the right, and that padding counted as correct background in the loss; validation excluded its own padding. This was fixed afterwards (the padding of a crop is not valid), and the effect on the scores was not measured, so the table above is the old behavior.
 - **How to read it.**
   - The folds differ a lot (0.37 to 0.81), and each validation fold has only 15 to 19 images with a mass, so no single fold gives a safe estimate.
   - On the Dice over all images, the model clearly beats predicting nothing in folds 1 and 4 only; fold 2 is level, and folds 0 and 3 are worse. It is not yet a useful detector.
@@ -194,7 +198,7 @@ Each probability map is turned into a prediction under every combination of a **
   - Fold 3 is the weak one. Its false-alarm rate jumps between 0.04 and 0.96 from one epoch to the next, even at a small learning rate, so on normal tissue the predicted probabilities probably lie close to the threshold of 0.5 (not tested). A threshold and a minimum size of the predicted regions are the cheapest things to try.
   - Crops, a batch of 8 and 512 samples per epoch were changed together, so the effect of the crop alone is not separated. Nothing here uses the held-out test set.
 - The false-alarm rate counts one predicted pixel as a false alarm, so it was 1.000 in almost every whole-image run and does not discriminate well. A companion that ignores very small predicted regions, or the predicted area on images without a mass, is needed.
-- **Not tried:** other GPUs, the held-out test set, thresholds other than 0.5, post-processing of the predicted regions, changes of the loss, a warm-up or lower encoder learning rate, averaging of weights, and other crop sizes.
+- **Not tried:** batches with a fixed composition on the real data (implemented, see section 4), the training after the padding fix, other GPUs, the held-out test set, thresholds other than 0.5, post-processing of the predicted regions, changes of the loss, a warm-up or lower encoder learning rate, averaging of weights, and other crop sizes.
 
 ## Next steps
 
