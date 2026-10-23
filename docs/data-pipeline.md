@@ -111,18 +111,37 @@ Arguments:
 | `--seed N` | Random seed (default 0) |
 | `--manifest`, `--output` | Input manifest (default `data/processed/manifest.json`) and output file (default `data/processed/splits.json`) |
 
-Code, in `src/mammo_seg/data/`: `splitting.py` (the stratified splitting of patients) and `splits.py` (splits from the manifest, the file format and the command).
+Code, in `src/mammo_seg/data/`: `strata.py` (the stratum of every patient), `splitting.py` (the stratified splitting of patients) and `splits.py` (splits from the manifest, the file format and the command).
 
 ### How the splits are made
 
 1. Images with the `FB` view are left out (see the Views section of `dataset.md`). Every other image is kept, including all images without a mass: the normal ones and those with only calcifications or other lesions.
-2. One row per patient, flagged as having a mass if any of the patient's images has one.
-3. With `--test-fraction`, that share of patients is held out first (stratified on the flag). The rest is split into K folds with scikit-learn's `StratifiedKFold`, stratified on the same flag, so every fold has about the same share of patients with a mass and about the same size.
-4. Each image gets the set of its patient: `fold_<i>`, `test` or `excluded`.
+2. Every patient gets a **stratum** from up to three factors, most important first:
+   - with or without a mass (`mass`, `no_mass`);
+   - for a patient with a mass: whether any of the masses, in any image, is smaller than 100 mm² (`small`, `large`);
+   - whether any image of the patient has an ACR density of 3 or 4 (`dense`, `fatty`); the one image without a density counts as neither.
 
-The result does not depend on the order of the patients or images, and the same manifest, arguments and seed give the same file. The command prints a summary of patients, images and images with a mass per set.
+   For example `mass/small/dense` or `no_mass/fatty`. Mass areas are in mm², from the polygons at the native pixel size of 0.07 mm (see `dataset.md`), not in preprocessed pixels, whose size varies with the breast box.
+3. A stratum needs at least one patient for every set. A stratum with too few patients is merged with its neighbours by dropping its last factor (for example `mass/small/dense` and `mass/small/fatty` become `mass/small`), until every stratum is large enough or only the first factor is left.
+4. With `--test-fraction`, that share of patients is held out first, stratified on the strata merged to at least K + 1 patients (one for the test set and one per fold). The rest is split into K folds with scikit-learn's `StratifiedKFold`, stratified on the strata merged again, to at least K patients. Every set then gets about the same mix of patients and about the same size.
+5. Each image gets the set of its patient: `fold_<i>`, `test` or `excluded`.
 
-On the real manifest, 5 folds with a 20% test set give 22 test patients (10 with a mass) and folds of 17 or 18 patients, each with 8 patients with a mass.
+The result does not depend on the order of the patients or images, and the same manifest, arguments and seed give the same file. The command prints the patients, images and images with a mass per set, and the patients of every stratum per set.
+
+**Why these strata.** Stratifying only on "has a mass" left everything else to chance, and with 8 patients with a mass per fold, chance gave very different folds: the median mass area ranged from 84 to 583 mm² between the sets, and the share of patients with dense breasts from 1 in 17 to 11 in 22. Small masses are much harder to outline, and dense tissue causes false alarms, so these differences showed in the scores of the folds. The threshold of 100 mm² (about 11 mm across, about the smallest quarter of the masses) is the one that leaves at least 6 patients, one per set, in every stratum: at 50 mm² only 2 patients have a dense breast and a small mass.
+
+On the real manifest, 5 folds with a 20% test set give 22 test patients (10 with a mass) and folds of 17 or 18 patients, each with 8 patients with a mass. No stratum needs merging; the 108 patients are:
+
+| Stratum | Patients | Test set | Per fold |
+|---|---|---|---|
+| `no_mass/fatty` | 39 | 8 | 6 or 7 |
+| `no_mass/dense` | 19 | 4 | 3 |
+| `mass/large/fatty` | 25 | 5 | 4 |
+| `mass/small/fatty` | 12 | 3 | 1 or 2 |
+| `mass/large/dense` | 7 | 1 | 1 or 2 |
+| `mass/small/dense` | 6 | 1 | 1 |
+
+Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; the median mass area of the sets is 126 to 294 mm². Normal images (BI-RADS 1) are not a stratum and still vary, from 4 to 14 per set.
 
 ### Format
 
@@ -130,11 +149,13 @@ On the real manifest, 5 folds with a 20% test set give 22 test patients (10 with
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "manifest_fingerprint": "414d0377...",
   "seed": 0,
   "n_folds": 5,
   "test_fraction": 0.2,
+  "stratification": {"pixel_size_mm": 0.07, "small_mass_mm2": 100.0, "dense_acr": 3},
+  "strata": {"036aff49b8ac84f0": "mass/small/dense", "...": "..."},
   "splits": {
     "test_patients": ["036aff49b8ac84f0", "..."],
     "folds": [["...", "..."], ["...", "..."]],
@@ -144,15 +165,22 @@ On the real manifest, 5 folds with a 20% test set give 22 test patients (10 with
 ```
 
 - `manifest_fingerprint` is a SHA-256 hash of the manifest content. `check_manifest(splits_file, manifest)` returns the splits only if they were made from that manifest, and raises an error otherwise, so a step never uses splits that belong to another manifest.
-- The file is rejected if a patient is in two sets, a fold is empty, `n_folds` does not match the number of folds, or a test set exists without a test fraction (or the reverse).
-- `read_splits(path)` reads it, `splits_frame(manifest, splits)` gives one row per image with its set, and `split_summary(frame)` counts patients and images per set.
+- `stratification` holds the thresholds of the strata, and `strata` the stratum of every patient of the splits, before any merging.
+- The file is rejected if a patient is in two sets, a fold is empty, `n_folds` does not match the number of folds, a test set exists without a test fraction (or the reverse), or `strata` does not name exactly the patients of the splits.
+- Version 2 is the first with strata. A file of version 1 (stratified on masses only) is rejected, so make the splits again; its folds differ from the new ones.
+- `read_splits(path)` reads it, `splits_frame(manifest, splits)` gives one row per image with its set, `split_summary(frame)` counts patients and images per set, and `strata_summary(splits_file)` counts the patients of every stratum per set.
 
 ### Decisions
 
-- Splitting is by patient, stratified on "has at least one mass image", which is the only label that matters for the folds.
+- Splitting is by patient, stratified on the strata above: with or without a mass, a small mass, a dense breast. These are the patient properties that change the scores most; others (normal images, image size, view) are left to chance.
+- A patient is dense if any image is, and has a small mass if any mass is small, because a patient is one unit of the splits; the same mass can measure differently in its CC and MLO views.
 - The positive images per fold vary a little, because positive patients have between 1 and 4 positive images; the summary shows them.
 - `splits.json` is not committed, like the manifest.
 - There is no splitter interface for now. If a second strategy is needed, `splitting.py` is where an interface would go.
+
+### Review
+
+`notebooks/07_split_review.ipynb` shows, for every fold and the test set, the strata, the mass sizes, the breast densities and the share of normal images and of images with a mass. It can put the current splits next to an earlier `splits.json` of version 1, saved as `splits_v1.json`, to compare the two. It shows counts and sizes only, no images.
 
 ## 3. Masks
 

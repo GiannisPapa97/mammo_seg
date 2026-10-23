@@ -55,7 +55,7 @@ Then build the validated manifest (`data/processed/manifest.json`: every image w
 uv run python -m mammo_seg.data.manifest
 ```
 
-Then make patient-level stratified splits (`data/processed/splits.json`), for example 5 folds with a 20% test set:
+Then make patient-level splits (`data/processed/splits.json`), stratified on masses, mass size and breast density, for example 5 folds with a 20% test set:
 
 ```bash
 uv run python -m mammo_seg.data.splits --folds 5 --test-fraction 0.2
