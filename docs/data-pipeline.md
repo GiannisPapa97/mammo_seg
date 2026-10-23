@@ -343,7 +343,7 @@ PyTorch is an extra that picks its build (see the README): `uv sync --extra cpu`
 | `valid` | bool `[1, 1024, 800]`, true on the image, false on the padding |
 | `file_id` | the image id |
 
-Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every preprocessed image is 1024 px high and 276 to 784 px wide; 800 is the next multiple of 32, which a U-Net needs, and the chest wall is on the left, so padding only adds background next to the breast. An image wider than the canvas is an error, not a silent crop. Losses and metrics should only count pixels where `valid` is true, or the padding counts as correctly predicted background. A crop of an image smaller than the crop (262 of the 410 images are narrower than 512 px) is padded the same way: the crop is smaller on that side and the dataset pads it, so its padding is not valid either.
+Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every preprocessed image is 1024 px high and 276 to 784 px wide; 800 is the next multiple of 32, which a U-Net needs, and the chest wall is on the left, so padding only adds background next to the breast. An image wider than the canvas is an error, not a silent crop. A crop of an image smaller than the crop (262 of the 410 images are narrower than 512 px) is padded the same way: the crop is smaller on that side and the dataset pads it, so its padding is not valid either. The metrics count only pixels where `valid` is true: the padding is not part of the image, and predictions there are cut off at inference. The training loss counts the padding too, as background ([training.md](training.md#2-loss)): no mass can be there, and the network sees padding at inference as well.
 
 ### Splits
 
@@ -358,9 +358,9 @@ Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every
 | `rotation` | 10 | degrees, either way |
 | `scale` | 0.1 | zoom by 1 +- 0.1 |
 | `shift` | 0.1 | of the width and height |
-| `brightness`, `contrast` | 0.1 | factor 1 +- 0.1, image only |
-| `gamma` | 0.2 | exponent 1 +- 0.2, image only |
-| `noise` | 0.01 | Gaussian, standard deviation, image only |
+| `brightness`, `contrast` | 0.1 | factor 1 +- 0.1, the breast only |
+| `gamma` | 0.2 | exponent 1 +- 0.2, the breast only |
+| `noise` | 0.01 | Gaussian, standard deviation, the breast only |
 | `crop_size` | none | a patch of this size instead of the whole image; on a side where the image is smaller, the patch is the whole image on that side |
 | `crop_mass_fraction` | 0.5 | for an image that has a mass, the chance that the patch is placed around a randomly chosen mass pixel (at a random place of the patch); otherwise the patch is placed at random. A random patch seldom holds a mass that covers well under 1% of the image |
 
@@ -370,6 +370,8 @@ With a crop, a patch can also be asked for by kind (`Augmentation(image, mask, k
 - `"negative"`: the patch contains no mass pixel and is centred on a random breast pixel (brighter than 0.05 on the 0..1 scale, which is the preprocessing threshold of 100 of 4095 rounded up), so it is not just background. A patch that holds a mass pixel is drawn again, up to 20 times; if none is free, the one with the fewest mass pixels is used, so a negative patch can hold a sliver of a mass. This happens when the patch is large against the image: a 512 px patch is half the height of a preprocessed image and, for an image narrower than 512 px, as wide as it, so no patch avoids a mass in the middle rows. Measured on fold 0 with 512 px patches (one epoch, 128 negative patches of images with a mass), 19% to 22% of them held mass pixels, a median of 0.23% of the patch (at most 10.4%); the negative patches of images without a mass never did.
 
 `crop_mass_fraction` only applies without a kind.
+
+**The background stays exactly 0.** The scanner sets the air around the breast to exactly 0: a median of 29% of every preprocessed image is one flat region of zeros, and the padding is 0 too. Validation and inference see that background flat, so the augmentation keeps it: pixels that are 0 after the geometric changes (the background, and the area a rotation or shift brings in) are set back to 0 after the intensity changes. Noise and contrast therefore only change the breast. Before this, the noise turned the background into a speckle of small values: on fold 0, no pixel of the image part of a 512 px training patch lay in a flat area of zeros (a 5 x 5 neighbourhood of zeros), against 29% of the pixels of a validation image; with the background kept, 19% of them do. The only flat zeros left in training were the padding, which the loss then left out, so the network was never trained on the flat background that validation scores (see [training.md](training.md#the-flat-background)). This also keeps the negative patches on the breast: a noised background lifted by gamma could pass the breast threshold.
 
 The mask is resampled by nearest neighbour and stays 0/1. There are no flips: every chest wall is on the left after preprocessing, and flipping would show the model breasts it never sees at inference. On real images, the mask area after augmentation is 0.86 to 1.18 times the original, as the 10% scaling implies.
 
