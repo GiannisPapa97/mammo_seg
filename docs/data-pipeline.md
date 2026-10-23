@@ -180,7 +180,7 @@ Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; 
 
 ### Review
 
-`notebooks/07_split_review.ipynb` shows, for every fold and the test set, the strata, the mass sizes, the breast densities and the share of normal images and of images with a mass. It can put the current splits next to an earlier `splits.json` of version 1, saved as `splits_v1.json`, to compare the two. It shows counts and sizes only, no images.
+`notebooks/07_split_review.ipynb` shows, for every fold and the test set, the strata, the mass sizes and the breast densities. It can put the current splits next to an earlier `splits.json` of version 1, saved as `splits_v1.json`, to compare the two. It shows counts and sizes only, no images.
 
 ## 3. Masks
 
