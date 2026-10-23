@@ -8,7 +8,8 @@ is on the left in every preprocessed image, so the padding only adds background
 next to the breast.
 
 Every sample also carries ``valid``, which is true on the pixels of the image and
-false on the padding, so losses and metrics can leave the padding out.
+false on the padding, so losses and metrics can leave the padding out. A crop of an
+image smaller than the crop is padded too, so its padding is not valid either.
 """
 
 from collections.abc import Callable, Sequence

@@ -6,7 +6,9 @@ nearest neighbour so it stays 0/1. Intensity changes (brightness, contrast, gamm
 noise) only touch the image. An optional crop then cuts a patch out of both. The
 masses cover well under 1% of an image, so a uniformly random patch seldom holds
 one: with probability ``crop_mass_fraction`` the patch is placed around a randomly
-chosen mass pixel (when the image still has one after the geometric changes).
+chosen mass pixel (when the image still has one after the geometric changes). An
+image smaller than the patch gives a smaller patch on that side; the dataset pads
+it to the canvas and marks the padding as not valid.
 
 There are no flips: preprocessing puts every chest wall on the left, and flipping
 would show the model breasts it never sees at inference.
@@ -20,7 +22,6 @@ from typing import Annotated
 import torch
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
-from torch.nn import functional
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
@@ -99,14 +100,11 @@ class Augmentation:
     def _crop(
         self, image: torch.Tensor, mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """A patch of ``crop_size``; an image smaller than the patch is zero-padded."""
+        """A patch of ``crop_size``, or the whole image on a side that is smaller."""
         assert self.settings.crop_size is not None
-        rows, cols = self.settings.crop_size
         height, width = image.shape[-2:]
-        if height < rows or width < cols:
-            padding = (0, max(cols - width, 0), 0, max(rows - height, 0))
-            image, mask = functional.pad(image, padding), functional.pad(mask, padding)
-            height, width = image.shape[-2:]
+        rows = min(self.settings.crop_size[0], height)
+        cols = min(self.settings.crop_size[1], width)
         top = int(torch.randint(0, height - rows + 1, ()))
         left = int(torch.randint(0, width - cols + 1, ()))
         masses = torch.nonzero(mask[0] > 0.5)

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -181,11 +182,21 @@ def test_crops_are_repeatable_with_the_same_seed() -> None:
         assert torch.equal(a, c) and torch.equal(b, d)
 
 
-def test_a_crop_larger_than_the_image_is_padded() -> None:
-    crop = AugmentationSettings(crop_size=(80, 60))
+def test_a_crop_larger_than_the_image_keeps_the_whole_image_on_that_side() -> None:
+    sample = lesion_sample()  # 64 x 48
+    for crop_size, expected in [
+        ((80, 60), (64, 48)),  # larger on both sides
+        ((80, 24), (64, 24)),  # larger in height only
+        ((32, 60), (32, 48)),  # larger in width only
+    ]:
+        crop = replace(NOTHING, crop_size=crop_size)
+        torch.manual_seed(0)
+        image, mask = Augmentation(crop)(*sample)
+        assert image.shape == mask.shape == (1, *expected)
+    # With nothing to move, a patch as large as the image is the image.
     torch.manual_seed(0)
-    image, mask = Augmentation(crop)(*lesion_sample())
-    assert image.shape == mask.shape == (1, 80, 60)
+    image, mask = Augmentation(replace(NOTHING, crop_size=(80, 60)))(*sample)
+    assert torch.equal(image, sample[0]) and torch.equal(mask, sample[1])
 
 
 @pytest.mark.parametrize(
@@ -218,3 +229,23 @@ def test_the_dataset_applies_the_augmentation_before_padding(tmp_path: Path) -> 
     sample = dataset[0]
     assert sample["image"].shape == (1, 64, 48)
     assert sample["valid"][0, :32, :24].all() and not sample["valid"][0, 32:].any()
+
+
+def test_the_padding_of_a_crop_of_a_small_image_is_not_valid(tmp_path: Path) -> None:
+    write_preprocessed(tmp_path, SETTINGS)  # 64 high; 30, 48 and 20 px wide
+    crop = replace(NOTHING, crop_size=(32, 48))
+    dataset = MammogramDataset(
+        tmp_path,
+        ["00000001", "00000002", "00000003"],
+        SETTINGS,
+        (32, 48),
+        transform=Augmentation(crop),
+    )
+    torch.manual_seed(0)
+    narrow, full, narrowest = dataset[0], dataset[1], dataset[2]
+    assert narrow["image"].shape == (1, 32, 48)
+    assert narrow["valid"][0, :, :30].all() and not narrow["valid"][0, :, 30:].any()
+    assert (narrow["image"][0, :, 30:] == 0).all()
+    assert full["valid"].all()
+    assert narrowest["valid"][0, :, :20].all()
+    assert not narrowest["valid"][0, :, 20:].any()
