@@ -13,17 +13,33 @@ it to the canvas and marks the padding as not valid.
 There are no flips: preprocessing puts every chest wall on the left, and flipping
 would show the model breasts it never sees at inference.
 
+A crop can also be asked for by kind, to build batches of a known composition: a
+``"mass"`` patch contains at least one mass pixel (when the image still has one) and
+a ``"negative"`` patch contains none and is centred on the breast, so it is not just
+background. Without a kind the patch is placed as described above.
+
 Augmentation is only for training. It uses PyTorch's random number generator, so
 seeding PyTorch (the data loaders do) makes it reproducible.
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import torch
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 from torchvision import tv_tensors
 from torchvision.transforms import v2
+
+PatchKind = Literal["mass", "negative"]
+
+# Pixels brighter than this (on the 0..1 scale) are breast: the background of the
+# preprocessed images is close to 0 and the breast is far above it. This is the
+# threshold of the preprocessing, 100 of 4095, rounded up; on the INbreast images
+# the two differ on 0.1% of the breast pixels.
+BREAST_THRESHOLD = 0.05
+# Tries to place a negative patch where it holds no mass pixel; if all fail (a mass
+# that fills the breast), the try with the fewest mass pixels is used.
+NEGATIVE_TRIES = 20
 
 
 @dataclass(frozen=True, config=ConfigDict(strict=True, extra="forbid"))
@@ -81,8 +97,18 @@ class Augmentation:
         self.intensity = v2.Compose(intensity or [v2.Identity()])
 
     def __call__(
-        self, image: torch.Tensor, mask: torch.Tensor
+        self,
+        image: torch.Tensor,
+        mask: torch.Tensor,
+        kind: PatchKind | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Augment, and cut a patch of ``crop_size`` if it is set.
+
+        ``kind`` asks for a patch with or without a mass (see the module docstring)
+        and needs ``crop_size``; ValueError otherwise.
+        """
+        if kind is not None and self.settings.crop_size is None:
+            raise ValueError(f"a {kind!r} patch needs crop_size to be set")
         moved_image, moved_mask = self.geometric(
             tv_tensors.Image(image), tv_tensors.Mask(mask)
         )
@@ -94,11 +120,11 @@ class Augmentation:
         result = changed.as_subclass(torch.Tensor).clamp(0.0, 1.0)
         mask_result = moved_mask.as_subclass(torch.Tensor)
         if self.settings.crop_size is not None:
-            return self._crop(result, mask_result)
+            return self._crop(result, mask_result, kind)
         return result, mask_result
 
     def _crop(
-        self, image: torch.Tensor, mask: torch.Tensor
+        self, image: torch.Tensor, mask: torch.Tensor, kind: PatchKind | None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """A patch of ``crop_size``, or the whole image on a side that is smaller."""
         assert self.settings.crop_size is not None
@@ -108,10 +134,52 @@ class Augmentation:
         top = int(torch.randint(0, height - rows + 1, ()))
         left = int(torch.randint(0, width - cols + 1, ()))
         masses = torch.nonzero(mask[0] > 0.5)
-        if len(masses) and torch.rand(()).item() < self.settings.crop_mass_fraction:
-            row, col = masses[int(torch.randint(0, len(masses), ()))].tolist()
-            # The chosen pixel lands at a random place of the patch.
-            top = min(max(row - int(torch.randint(0, rows, ())), 0), height - rows)
-            left = min(max(col - int(torch.randint(0, cols, ())), 0), width - cols)
+        if kind == "negative":
+            top, left = self._negative_window(image, mask, rows, cols)
+        elif kind == "mass":
+            # A mass that the geometric changes pushed out of the image leaves a
+            # patch at random.
+            if len(masses):
+                top, left = _around(masses, rows, cols, height, width)
+        elif len(masses) and torch.rand(()).item() < self.settings.crop_mass_fraction:
+            top, left = _around(masses, rows, cols, height, width)
         window = (slice(None), slice(top, top + rows), slice(left, left + cols))
         return image[window], mask[window]
+
+    @staticmethod
+    def _negative_window(
+        image: torch.Tensor, mask: torch.Tensor, rows: int, cols: int
+    ) -> tuple[int, int]:
+        """The corner of a patch centred on a random breast pixel, without mass.
+
+        A patch with a mass pixel is drawn again, up to ``NEGATIVE_TRIES`` times.
+        """
+        height, width = image.shape[-2:]
+        breast = torch.nonzero(image[0] > BREAST_THRESHOLD)
+        best: tuple[float, int, int] | None = None
+        for _ in range(NEGATIVE_TRIES):
+            if len(breast):
+                row, col = breast[int(torch.randint(0, len(breast), ()))].tolist()
+            else:  # no breast found (a blank image): anywhere
+                row = int(torch.randint(0, height, ()))
+                col = int(torch.randint(0, width, ()))
+            top = min(max(row - rows // 2, 0), height - rows)
+            left = min(max(col - cols // 2, 0), width - cols)
+            held = float(mask[0, top : top + rows, left : left + cols].sum())
+            if held == 0:
+                return top, left
+            if best is None or held < best[0]:
+                best = (held, top, left)
+        assert best is not None
+        return best[1], best[2]
+
+
+def _around(
+    pixels: torch.Tensor, rows: int, cols: int, height: int, width: int
+) -> tuple[int, int]:
+    """The corner of a patch that holds a random one of the ``pixels``, at a random
+    place of the patch (the patch stays inside the image)."""
+    row, col = pixels[int(torch.randint(0, len(pixels), ()))].tolist()
+    top = min(max(row - int(torch.randint(0, rows, ())), 0), height - rows)
+    left = min(max(col - int(torch.randint(0, cols, ())), 0), width - cols)
+    return top, left

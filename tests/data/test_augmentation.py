@@ -7,7 +7,12 @@ from pydantic import ValidationError
 from tests.data.preprocessed import CANVAS, SETTINGS, write_preprocessed
 from torchvision.transforms import v2
 
-from mammo_seg.data.augmentation import Augmentation, AugmentationSettings
+from mammo_seg.data.augmentation import (
+    BREAST_THRESHOLD,
+    Augmentation,
+    AugmentationSettings,
+    PatchKind,
+)
 from mammo_seg.data.dataset import MammogramDataset
 
 NOTHING = AugmentationSettings(
@@ -197,6 +202,142 @@ def test_a_crop_larger_than_the_image_keeps_the_whole_image_on_that_side() -> No
     torch.manual_seed(0)
     image, mask = Augmentation(replace(NOTHING, crop_size=(80, 60)))(*sample)
     assert torch.equal(image, sample[0]) and torch.equal(mask, sample[1])
+
+
+# --- patches of a kind ---
+
+
+def breast_sample() -> tuple[torch.Tensor, torch.Tensor]:
+    """A 64 x 48 image that is black except for a breast (rows 8 to 56, columns 0 to
+    24) with a 16 x 16 mass in it; the mask marks the mass."""
+    image = torch.zeros(1, 64, 48)
+    image[0, 8:56, :24] = 0.4
+    image[0, 24:40, 4:20] = 0.9
+    mask = torch.zeros(1, 64, 48)
+    mask[0, 24:40, 4:20] = 1
+    return image, mask
+
+
+def typed(
+    kind: PatchKind, seeds: int = 40, **changes: object
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    settings = replace(NOTHING, crop_size=(16, 16), **changes)  # type: ignore[arg-type]
+    found = []
+    for seed in range(seeds):
+        torch.manual_seed(seed)
+        found.append(Augmentation(settings)(*breast_sample(), kind))
+    return found
+
+
+def test_a_mass_patch_always_contains_part_of_the_mass() -> None:
+    patches = typed("mass")
+    assert all(mask.sum() > 0 for _, mask in patches)
+    assert all(image.shape == mask.shape == (1, 16, 16) for image, mask in patches)
+    assert len({tuple(torch.nonzero(mask[0])[0].tolist()) for _, mask in patches}) > 3
+
+
+def test_a_negative_patch_never_contains_the_mass() -> None:
+    patches = typed("negative")
+    assert all(mask.sum() == 0 for _, mask in patches)
+    assert all(image.shape == mask.shape == (1, 16, 16) for image, mask in patches)
+
+
+def test_a_negative_patch_always_holds_breast_where_random_patches_do_not() -> None:
+    # The breast covers the left half of the image: a random patch of 16 x 16 is
+    # sometimes only background, one centred on a breast pixel never is.
+    assert all((image > BREAST_THRESHOLD).any() for image, _ in typed("negative"))
+    random = Augmentation(replace(NOTHING, crop_size=(16, 16)))
+    background_only = 0
+    for seed in range(40):
+        torch.manual_seed(seed)
+        image, _ = random(*breast_sample())
+        background_only += int(not (image > BREAST_THRESHOLD).any())
+    assert background_only > 0
+
+
+def test_the_kind_overrides_the_share_of_patches_around_a_mass() -> None:
+    assert all(mask.sum() > 0 for _, mask in typed("mass", crop_mass_fraction=0.0))
+    assert all(mask.sum() == 0 for _, mask in typed("negative", crop_mass_fraction=1.0))
+
+
+def test_patches_of_a_kind_are_repeatable_with_the_same_seed() -> None:
+    for kind in ("mass", "negative"):
+        for (a, b), (c, d) in zip(typed(kind, 5), typed(kind, 5), strict=True):
+            assert torch.equal(a, c) and torch.equal(b, d)
+
+
+def test_a_negative_patch_of_an_image_without_a_mass() -> None:
+    image, _ = breast_sample()
+    torch.manual_seed(0)
+    patch, patch_mask = Augmentation(replace(NOTHING, crop_size=(16, 16)))(
+        image, torch.zeros_like(image), "negative"
+    )
+    assert patch.shape == patch_mask.shape == (1, 16, 16) and patch_mask.sum() == 0
+
+
+def test_a_mass_patch_of_an_image_without_a_mass_is_placed_at_random() -> None:
+    image, _ = breast_sample()
+    torch.manual_seed(0)
+    patch, patch_mask = Augmentation(replace(NOTHING, crop_size=(16, 16)))(
+        image, torch.zeros_like(image), "mass"
+    )
+    assert patch.shape == patch_mask.shape == (1, 16, 16) and patch_mask.sum() == 0
+
+
+def test_a_negative_patch_of_an_image_without_breast_is_placed_anywhere() -> None:
+    blank = torch.zeros(1, 64, 48)
+    torch.manual_seed(0)
+    patch, patch_mask = Augmentation(replace(NOTHING, crop_size=(16, 16)))(
+        blank, blank.clone(), "negative"
+    )
+    assert patch.shape == patch_mask.shape == (1, 16, 16)
+
+
+def test_a_negative_patch_is_drawn_again_until_it_avoids_the_mass() -> None:
+    # The mass fills the left half of the image: only patches on the right are
+    # free, and a third of the possible centres lead to one.
+    image = torch.full((1, 64, 48), 0.4)
+    mask = torch.zeros(1, 64, 48)
+    mask[0, :, :24] = 1
+    for seed in range(20):
+        torch.manual_seed(seed)
+        _, patch_mask = Augmentation(replace(NOTHING, crop_size=(16, 16)))(
+            image, mask, "negative"
+        )
+        assert patch_mask.sum() == 0
+
+
+def test_when_no_patch_avoids_the_mass_the_one_with_the_least_is_used() -> None:
+    # The mass fills all of the image but the last 8 columns: no patch is free, and
+    # a patch at the right edge holds half as many mass pixels as one elsewhere.
+    image = torch.full((1, 64, 48), 0.4)
+    mask = torch.zeros(1, 64, 48)
+    mask[0, :, :40] = 1
+    held = []
+    for seed in range(20):
+        torch.manual_seed(seed)
+        patch, patch_mask = Augmentation(replace(NOTHING, crop_size=(16, 16)))(
+            image, mask, "negative"
+        )
+        assert patch.shape == (1, 16, 16)
+        held.append(int(patch_mask.sum()))
+    assert all(count < 16 * 16 for count in held)
+    assert min(held) == 8 * 16
+
+
+def test_a_patch_of_a_kind_on_a_small_image_is_the_whole_image_on_that_side() -> None:
+    image, mask = torch.full((1, 10, 8), 0.4), torch.zeros(1, 10, 8)
+    for kind in ("mass", "negative"):
+        patch, patch_mask = Augmentation(replace(NOTHING, crop_size=(16, 16)))(
+            image, mask, kind
+        )
+        assert patch.shape == patch_mask.shape == (1, 10, 8)
+
+
+@pytest.mark.parametrize("kind", ["mass", "negative"])
+def test_a_kind_needs_a_crop_size(kind: PatchKind) -> None:
+    with pytest.raises(ValueError, match="needs crop_size"):
+        Augmentation(NOTHING)(*lesion_sample(), kind)
 
 
 @pytest.mark.parametrize(
