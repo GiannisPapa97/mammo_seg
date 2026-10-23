@@ -143,7 +143,7 @@ mammo-seg train --epochs 30 --selection-metric with_mass.dice --device cuda
 
 The data steps are the same commands as `python -m mammo_seg.data.<step>`: `mammo-seg manifest`, `splits`, `masks` and `preprocess`. Training reads the preprocessing settings and the canvas from the preprocessed data, so they cannot disagree with it.
 
-On Kaggle, use [notebooks/05_kaggle_training.ipynb](../notebooks/05_kaggle_training.ipynb). Its first cell holds the experiment: the folds (`FOLDS`), the time shared by them (`MAX_MINUTES`) and any other `mammo-seg train` options (`TRAIN_OPTIONS`). The next cells install the package, rebuild the manifest, splits, masks and preprocessed images from the attached INbreast dataset (a few minutes, so nothing derived has to be uploaded), train each fold with the time that is left, and print the best epoch of each. To continue in a later session, save a version, add its output as an input and set `PREVIOUS_RUNS`; a fold with a `last.pt` is resumed and a finished fold returns at once. The notebook asks for `--device cuda`, so a notebook without a GPU stops with an error.
+On Kaggle, use [notebooks/05_kaggle_training.ipynb](../notebooks/05_kaggle_training.ipynb). Its first cell holds the experiment: the folds (`FOLDS`), the time shared by them (`MAX_MINUTES`) and any other `mammo-seg train` options (`TRAIN_OPTIONS`, set to the crop settings that worked, see below; `FOLDS` is `[0]`, use `[0, 1, 2, 3, 4]` for all five). The next cells install the package, rebuild the manifest, splits, masks and preprocessed images from the attached INbreast dataset (a few minutes, so nothing derived has to be uploaded), train each fold with the time that is left, and print the best epoch of each. To continue in a later session, save a version, add its output as an input and set `PREVIOUS_RUNS`; a fold with a `last.pt` is resumed and a finished fold returns at once. The notebook asks for `--device cuda`, so a notebook without a GPU stops with an error.
 
 ### What has and has not been tried
 
@@ -161,11 +161,28 @@ On Kaggle, use [notebooks/05_kaggle_training.ipynb](../notebooks/05_kaggle_train
   - **The last epoch (60) is not a model that predicts nothing.** On eight validation images (four with a mass, four without), it predicted 53,000 to 123,000 pixels per image in evaluation mode and 14,000 to 26,000 in training mode, with none inside a mass. Recomputing the statistics changed nothing. The training at 5e-4 is unstable.
   - These two checks were done with throwaway scripts that are not in the repository.
 - **The masks lie on the lesions, as far as a look can tell.** Overlays of the preprocessed masks on the preprocessed images, for six of the 68 training images with a mass of fold 0 (picked at even spacing, not at random): in five, the outline encloses a distinct dense region of the shape of a mass, and the chest wall is on the left, so the flip of right breasts worked. In the sixth, one mask is cut by the left image border and a second one is tiny, so it was inconclusive. This rules out a gross flip or offset, but is not a proof for every image. The masses are small against the whole breast and many dense regions look like them, which is what makes the task hard.
-- **The cause is not known.** The learning rate is unlikely to be the main one (1e-4 over-predicts, 5e-4 is unstable). Open candidates: the full-image protocol itself (training on crops centred on lesions is the usual choice for such small masses, and also gives larger and more informative batches), and the loss (a Dice per image on masses that cover a few tenths of a percent of the image).
-- The false-alarm rate counts one predicted pixel as a false alarm, so it was 1.000 in almost every run and does not help to compare them. A companion that ignores very small predicted regions, or the predicted area on images without a mass, is needed.
-- **Not tried:** the other folds, other GPUs, the held-out test set, training on crops, and changes of the loss or of the normalization layers.
+- **Training on crops works.** All five folds, with `--crop-size 512 --batch-size 8 --samples-per-epoch 512 --patience 0 --selection-metric with_mass.dice` (half of the crops around a mass, the rest at random; whole images for validation; 60 epochs, about 19 s per epoch on a T4, about 19 minutes per fold). Whole-image training gave a Dice of 0.02 to 0.08 on the images with a mass of fold 0; with crops no fold collapses, and the late epochs are stable. The mean of the last 10 epochs of each fold (rounded; the all-images row compares with a model that predicts nothing, which scores the share of images without a mass):
+
+  | Fold | Dice, images with a mass | False-alarm rate | Dice, all images | Predict nothing |
+  |---|---|---|---|---|
+  | 0 | 0.50 | 0.35 | 0.61 | 0.73 |
+  | 1 | 0.52 | 0.09 | 0.80 | 0.73 |
+  | 2 | 0.63 | 0.24 | 0.73 | 0.75 |
+  | 3 | 0.37 | 0.69 | 0.32 | 0.71 |
+  | 4 | 0.81 | 0.05 | 0.92 | 0.75 |
+  | mean | about 0.56 | about 0.28 | about 0.68 | |
+
+- **How to read it.**
+  - The folds differ a lot (0.37 to 0.81), and each validation fold has only 15 to 19 images with a mass, so no single fold gives a safe estimate.
+  - On the Dice over all images, the model clearly beats predicting nothing in folds 1 and 4 only; fold 2 is level, and folds 0 and 3 are worse. It is not yet a useful detector.
+  - **Do not quote the mean of the best epochs** (0.723 in the Results cell of the notebook). Each best epoch is chosen on its own validation fold by the Dice on images with a mass alone, which favours epochs that over-predict (fold 0's best epoch has a false-alarm rate of 0.73), so it is optimistic. Use the converged values above.
+  - Fold 3 is the weak one. Its false-alarm rate jumps between 0.04 and 0.96 from one epoch to the next, even at a small learning rate, so on normal tissue the predicted probabilities probably lie close to the threshold of 0.5 (not tested). A threshold and a minimum size of the predicted regions are the cheapest things to try.
+  - Crops, a batch of 8 and 512 samples per epoch were changed together, so the effect of the crop alone is not separated. Nothing here uses the held-out test set.
+- The false-alarm rate counts one predicted pixel as a false alarm, so it was 1.000 in almost every whole-image run and does not discriminate well. A companion that ignores very small predicted regions, or the predicted area on images without a mass, is needed.
+- **Not tried:** other GPUs, the held-out test set, thresholds other than 0.5, post-processing of the predicted regions, changes of the loss, a warm-up or lower encoder learning rate, averaging of weights, and other crop sizes.
 
 ## Next steps
 
-- Make the model fit and generalize on one fold before cross-validation or any search for settings. The next change is to train on crops (half of them centred on a mass), with a larger batch, and keep validating on full images so the protocol does not change; add a false-alarm measure that ignores tiny predicted regions.
+- An `evaluate` command that scores a checkpoint on a validation fold or the test set, with a threshold and a minimum region size, a false-alarm measure that ignores tiny regions, and the baseline of predicting nothing. It should show whether the false alarms can be reduced without retraining.
+- Judge the folds by the converged values and the paired differences between settings, not by the best epoch. Change one thing at a time.
 - Evaluation on the held-out test set, with the simple baselines the protocol calls for.
