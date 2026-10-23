@@ -4,12 +4,16 @@ from pathlib import Path
 
 import pytest
 import torch
+from pydantic import ValidationError
 from tests.data.manifests import make_image
 from tests.data.preprocessed import CANVAS, SETTINGS, WIDTHS, write_preprocessed
 
+from mammo_seg.data.augmentation import Augmentation, AugmentationSettings
 from mammo_seg.data.dataset import MammogramDataset
 from mammo_seg.data.loaders import (
     DEFAULT_POSITIVE_FRACTION,
+    BatchComposition,
+    TypedBatchSampler,
     balanced_sampler,
     evaluation_loader,
     has_mass_of,
@@ -157,6 +161,180 @@ def test_the_training_loader_needs_the_images_in_the_manifest(
     other = Manifest(version=1, images=(replace(manifest.images[0]),))
     with pytest.raises(ValueError, match="not in the manifest"):
         training_loader(dataset, other, batch_size=2)
+
+
+# --- batches of a known composition ---
+
+NOTHING = AugmentationSettings(
+    rotation=0, scale=0, shift=0, brightness=0, contrast=0, gamma=0, noise=0
+)
+
+
+def test_a_composition_has_the_size_of_its_parts() -> None:
+    assert BatchComposition().size == 8  # 4 + 2 + 2
+    assert BatchComposition(3, 1, 2).size == 6
+    assert BatchComposition(1, 0, 0).size == 1
+
+
+@pytest.mark.parametrize("parts", [(0, 0, 0), (-1, 2, 2), (4, -2, 2), (4, 2, -2)])
+def test_a_composition_needs_a_batch_and_no_negative_count(
+    parts: tuple[int, int, int],
+) -> None:
+    with pytest.raises((ValidationError, ValueError)):
+        BatchComposition(*parts)
+
+
+def test_every_batch_has_the_make_up_of_the_composition() -> None:
+    has_mass = [True] * 3 + [False] * 7
+    sampler = TypedBatchSampler(has_mass, BatchComposition(4, 2, 2), 50)
+    batches = list(sampler)
+    assert len(sampler) == len(batches) == 50
+    for batch in batches:
+        assert len(batch) == 8
+        masses, from_mass_images, from_normal_images = batch[:4], batch[4:6], batch[6:]
+        assert {kind for _, kind in masses} == {"mass"}
+        assert {kind for _, kind in from_mass_images + from_normal_images} == {
+            "negative"
+        }
+        assert all(has_mass[index] for index, _ in masses + from_mass_images)
+        assert not any(has_mass[index] for index, _ in from_normal_images)
+
+
+def test_the_images_of_a_batch_are_drawn_with_replacement() -> None:
+    # One image with a mass: every mass patch of an epoch comes from it.
+    sampler = TypedBatchSampler([True, False, False], BatchComposition(4, 0, 0), 5)
+    assert all(index == 0 for batch in sampler for index, _ in batch)
+    # Many images: the draws spread over them.
+    many = TypedBatchSampler([True] * 50, BatchComposition(4, 0, 0), 20)
+    assert len({index for batch in many for index, _ in batch}) > 10
+
+
+def test_a_part_of_zero_patches_needs_no_such_images() -> None:
+    only_masses = TypedBatchSampler([True, True], BatchComposition(2, 0, 0), 2)
+    assert all(len(batch) == 2 for batch in only_masses)
+    only_normal = TypedBatchSampler([False, False], BatchComposition(0, 0, 3), 2)
+    assert all(kind == "negative" for batch in only_normal for _, kind in batch)
+
+
+def test_the_batches_are_reproducible_with_a_seeded_generator() -> None:
+    def draw(seed: int) -> list[list[tuple[int, str]]]:
+        generator = torch.Generator().manual_seed(seed)
+        sampler = TypedBatchSampler(
+            [True] * 5 + [False] * 5, BatchComposition(), 4, generator
+        )
+        return list(sampler)  # type: ignore[arg-type]
+
+    assert draw(1) == draw(1)
+    assert draw(1) != draw(2)
+
+
+@pytest.mark.parametrize(
+    ("has_mass", "composition", "message"),
+    [
+        ([False, False], BatchComposition(4, 2, 2), "images with a mass"),
+        ([False, False], BatchComposition(0, 2, 2), "images with a mass"),
+        ([True, True], BatchComposition(4, 2, 2), "images without a mass"),
+    ],
+)
+def test_a_composition_needs_the_images_it_asks_for(
+    has_mass: list[bool], composition: BatchComposition, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        TypedBatchSampler(has_mass, composition, 1)
+
+
+def test_an_epoch_needs_a_batch() -> None:
+    with pytest.raises(ValueError, match="at least one batch"):
+        TypedBatchSampler([True, False], BatchComposition(1, 0, 1), 0)
+
+
+@pytest.fixture
+def patch_dataset(tmp_path: Path) -> MammogramDataset:
+    """Patches of 32 x 32 of the three images; only image 1 has a mass."""
+    write_preprocessed(tmp_path, SETTINGS)
+    crop = replace(NOTHING, crop_size=(32, 32))
+    return MammogramDataset(
+        tmp_path, IDS, SETTINGS, (32, 32), transform=Augmentation(crop)
+    )
+
+
+def test_the_training_loader_builds_batches_of_the_composition(
+    patch_dataset: MammogramDataset, manifest: Manifest
+) -> None:
+    composition = BatchComposition(2, 1, 1)
+    loader = training_loader(
+        patch_dataset, manifest, 4, samples_per_epoch=40, composition=composition
+    )
+    batches = list(loader)
+    assert len(batches) == 10
+    for batch in batches:
+        assert batch["image"].shape == (4, 1, 32, 32)
+        assert batch["valid"].shape == (4, 1, 32, 32)
+        mass_pixels = batch["mask"].flatten(1).sum(1)
+        assert batch["file_id"][:3] == ["00000001"] * 3
+        assert batch["file_id"][3] in ("00000002", "00000003")
+        assert (mass_pixels[:2] > 0).all()  # the mass patches contain the mass
+        assert (mass_pixels[2:] == 0).all()  # the negative ones do not
+
+
+def test_the_batches_of_a_composition_depend_on_the_seed(
+    patch_dataset: MammogramDataset, manifest: Manifest
+) -> None:
+    def order(seed: int) -> list[str]:
+        loader = training_loader(
+            patch_dataset,
+            manifest,
+            4,
+            samples_per_epoch=40,
+            seed=seed,
+            composition=BatchComposition(2, 1, 1),
+        )
+        return drawn_ids(loader)
+
+    assert order(3) == order(3)
+    assert order(3) != order(4)
+
+
+def test_the_default_epoch_of_a_composition_has_as_many_patches_as_images(
+    patch_dataset: MammogramDataset, manifest: Manifest
+) -> None:
+    loader = training_loader(
+        patch_dataset, manifest, 2, composition=BatchComposition(1, 0, 1)
+    )
+    assert len(loader) == 1  # 3 images, batches of 2
+
+
+def test_the_loader_of_a_composition_works_with_workers(
+    patch_dataset: MammogramDataset, manifest: Manifest
+) -> None:
+    loader = training_loader(
+        patch_dataset,
+        manifest,
+        4,
+        samples_per_epoch=8,
+        num_workers=2,
+        composition=BatchComposition(2, 1, 1),
+    )
+    assert len(drawn_ids(loader)) == 8
+
+
+def test_the_batch_size_must_be_the_size_of_the_composition(
+    patch_dataset: MammogramDataset, manifest: Manifest
+) -> None:
+    with pytest.raises(ValueError, match="batch size is 8 but .* 4 patches"):
+        training_loader(
+            patch_dataset, manifest, 8, composition=BatchComposition(2, 1, 1)
+        )
+
+
+def test_a_composition_needs_a_dataset_that_cuts_patches(
+    dataset: MammogramDataset, manifest: Manifest
+) -> None:
+    loader = training_loader(
+        dataset, manifest, 2, samples_per_epoch=2, composition=BatchComposition(1, 0, 1)
+    )
+    with pytest.raises(ValueError, match="needs a transform that cuts patches"):
+        next(iter(loader))
 
 
 # --- padding for inference ---

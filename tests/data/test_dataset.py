@@ -135,6 +135,38 @@ def test_a_transform_gets_the_unpadded_image_and_mask(directory: Path) -> None:
     assert sample["image"].shape == (1, 64, 48)
 
 
+def test_a_patch_of_a_kind_is_asked_from_the_transform(directory: Path) -> None:
+    seen: list[object] = []
+
+    def cut(
+        image: torch.Tensor, mask: torch.Tensor, kind: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        seen.append(kind)
+        return image[..., :16, :], mask[..., :16, :]
+
+    samples = dataset(directory, transform=cut)
+    sample = samples[(0, "mass")]
+    assert seen == ["mass"]
+    assert sample["image"].shape == (1, 64, 48)
+    assert sample["valid"][0, :16, :30].all() and not sample["valid"][0, 16:].any()
+    assert samples[(0, "negative")]["file_id"] == "00000001"
+    assert seen == ["mass", "negative"]
+
+
+def test_a_plain_index_does_not_ask_for_a_kind(directory: Path) -> None:
+    def two_arguments(
+        image: torch.Tensor, mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return image, mask
+
+    assert dataset(directory, transform=two_arguments)[0]["file_id"] == "00000001"
+
+
+def test_a_patch_of_a_kind_needs_a_transform(directory: Path) -> None:
+    with pytest.raises(ValueError, match="'mass' patch needs a transform"):
+        dataset(directory)[(0, "mass")]
+
+
 def test_samples_batch_with_a_data_loader(directory: Path) -> None:
     batch = next(iter(DataLoader(dataset(directory), batch_size=3)))
     assert batch["image"].shape == (3, 1, 64, 48)

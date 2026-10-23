@@ -20,6 +20,7 @@ import torch
 from torch.nn import functional
 from torch.utils.data import Dataset
 
+from mammo_seg.data.augmentation import PatchKind
 from mammo_seg.data.masks import read_mask
 from mammo_seg.data.preprocess_dataset import (
     RECORD_FILE,
@@ -39,7 +40,9 @@ DEFAULT_CANVAS = (1024, 800)
 # A U-Net halves the image five times, so its input sides must divide by 32.
 DEFAULT_MULTIPLE = 32
 
-Transform = Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+# (image, mask) -> (image, mask). To ask for a patch of a kind, a transform also takes
+# the kind as a third argument (see ``Augmentation``).
+Transform = Callable[..., tuple[torch.Tensor, torch.Tensor]]
 
 
 class Sample(TypedDict):
@@ -105,14 +108,23 @@ class MammogramDataset(Dataset[Sample]):
     def __len__(self) -> int:
         return len(self.file_ids)
 
-    def __getitem__(self, index: int) -> Sample:
+    def __getitem__(self, item: int | tuple[int, PatchKind]) -> Sample:
+        """The sample at an index, or, for ``(index, kind)``, a patch of that kind
+        (``"mass"`` or ``"negative"``), which needs a transform that cuts patches."""
+        index, kind = item if isinstance(item, tuple) else (item, None)
         file_id = self.file_ids[index]
         pixels = read_image(image_path(self.directory, file_id))
         normalized = normalize_intensity(pixels, self.settings)
         image = torch.from_numpy(normalized).unsqueeze(0)
         mask_array = read_mask(processed_mask_path(self.directory, file_id))
         mask = torch.from_numpy(mask_array).unsqueeze(0).float()
-        if self.transform is not None:
+        if kind is not None:
+            if self.transform is None:
+                raise ValueError(
+                    f"a {kind!r} patch needs a transform that cuts patches"
+                )
+            image, mask = self.transform(image, mask, kind)
+        elif self.transform is not None:
             image, mask = self.transform(image, mask)
         valid = torch.ones_like(image, dtype=torch.bool)
         return Sample(
