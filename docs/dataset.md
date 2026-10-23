@@ -25,8 +25,8 @@ The Kaggle page lists the license as "Unknown" and has no description. The origi
 - The filename is `<file id>_<patient id>_MG_<laterality>_<view>_ANON`. The patient id is the grouping key for splits (confirmed by `README.txt`). `INbreast.csv` has the patient id removed and links by file id only. Its file ids, laterality and view match the DICOM filenames for all 410 images.
 - Views: 203 CC, 206 MLO and one right-breast image with view `FB`. Left/right is balanced (209 / 201). See [Views](#views) below.
 - Two sizes: 3328 x 2560 (243 images) and 4084 x 3328 (167 images). Both occur in every acquisition period.
-- DICOM headers: 16-bit unsigned, `MONOCHROME2` (higher value = brighter, no inversion needed), uncompressed, modality `OT`. There is **no `PixelSpacing`** in the headers; if physical size is needed it has to come from the publication.
-- Actual intensities use 12 bits: the maximum value is at most 4095 in every image, although 16 bits are stored.
+- DICOM headers: 16-bit unsigned, `MONOCHROME2` (higher value = brighter, no inversion needed), uncompressed, modality `OT`. There is **no `PixelSpacing`** in the headers; the publication gives the pixel size: **70 µm (0.07 mm)**, from a Siemens MammoNovation full-field digital detector. The area of the 116 mass polygons at 0.07 mm per pixel agrees with the areas the publication reports (mean 475 mm² against 479, smallest 15 against 15, largest 3681 against 3689).
+- Actual intensities use 12 bits: the maximum value is at most 4095 in every image, although 16 bits are stored. The publication speaks of a "14-bit contrast resolution"; why the data stops at 12 bits is not explained.
 - Orientation follows laterality: left-breast images have the chest wall on the left, right-breast images on the right (checked on all 410). Flip one side to a common orientation before training.
 - BI-RADS (per image): 1: 67, 2: 220, 3: 23, 4a: 13, 4b: 8, 4c: 22, 5: 49, 6: 8.
 
@@ -133,4 +133,4 @@ Patients (108):
 ## Open questions
 
 - Is the Kaggle copy identical to the original release (108 patients here against 115 cases in the publication)?
-- Pixel spacing: the DICOM headers have none (see Images); confirm it against `inbreast.pdf` if physical sizes are needed.
+- The publication says "14-bit contrast resolution" but the data uses 12 bits. Does the Kaggle copy reduce the range, or did the detector never use the top bits? It makes no difference to the pipeline, which scales by the measured range.
