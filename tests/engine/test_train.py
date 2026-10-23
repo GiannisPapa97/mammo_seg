@@ -13,7 +13,7 @@ from tests.data.preprocessed import SETTINGS, write_preprocessed_for
 
 from mammo_seg.data.augmentation import AugmentationSettings
 from mammo_seg.data.dataset import MammogramDataset
-from mammo_seg.data.loaders import evaluation_loader, training_loader
+from mammo_seg.data.loaders import BatchComposition, evaluation_loader, training_loader
 from mammo_seg.data.preprocessing import PreprocessingSettings
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile, create_splits_file
@@ -135,6 +135,17 @@ def test_invalid_settings_are_rejected(bad: dict[str, object]) -> None:
 
 def test_the_sampler_can_be_switched_off() -> None:
     assert TrainingSettings(positive_fraction=None).positive_fraction is None
+
+
+def test_a_composition_is_off_by_default() -> None:
+    assert TrainingSettings().composition is None
+
+
+def test_the_batch_size_must_be_the_size_of_the_composition() -> None:
+    settings = TrainingSettings(batch_size=8, composition=BatchComposition(4, 2, 2))
+    assert settings.composition == BatchComposition(4, 2, 2)
+    with pytest.raises(ValidationError, match="batch size is 4 but the composition"):
+        TrainingSettings(batch_size=4, composition=BatchComposition(4, 2, 2))
 
 
 def test_selection_value_reads_the_group_and_the_metric() -> None:
@@ -709,3 +720,79 @@ def test_a_run_is_not_resumed_with_other_crops(data: Data, tmp_path: Path) -> No
     with pytest.raises(ValueError, match="augmentation"):
         run(AugmentationSettings(crop_size=(48, 48)), resume=True)
     assert run(CROPS, resume=True).stop_reason == "finished"
+
+
+# --- batches of a composition ---
+
+COMPOSED = replace(FAST, composition=BatchComposition(1, 0, 1))  # batches of 2
+
+
+def test_a_fold_trains_on_batches_of_the_composition(
+    data: Data, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+    real_training_loader = training_loader
+
+    def spy(dataset: MammogramDataset, *args: Any, **kwargs: Any) -> Any:
+        loader = real_training_loader(dataset, *args, **kwargs)
+        seen["batches"] = [batch["mask"].flatten(1).sum(1) for batch in loader]
+        return loader
+
+    monkeypatch.setattr(train_module, "training_loader", spy)
+    result = train_fold(
+        data.manifest,
+        data.splits_file,
+        data.directory,
+        fold=0,
+        settings=replace(COMPOSED, epochs=1),
+        model_settings=TINY,
+        preprocessing_settings=SETTINGS,
+        augmentation_settings=CROPS,
+        device=CPU,
+        canvas=CANVAS,
+    )
+    assert len(seen["batches"]) == 2  # 4 samples per epoch, batches of 2
+    for mass_pixels in seen["batches"]:
+        assert mass_pixels[0] > 0 and mass_pixels[1] == 0
+    assert result.history[0].validation.all_images.images == 8
+
+
+def test_a_composition_needs_crops(data: Data) -> None:
+    with pytest.raises(ValueError, match="made of patches"):
+        train_fold(
+            data.manifest,
+            data.splits_file,
+            data.directory,
+            fold=0,
+            settings=COMPOSED,
+            model_settings=TINY,
+            preprocessing_settings=SETTINGS,
+            device=CPU,
+            canvas=CANVAS,
+        )
+
+
+def test_a_run_is_not_resumed_with_another_composition(
+    data: Data, tmp_path: Path
+) -> None:
+    def run(settings: TrainingSettings, **options: Any) -> TrainingResult:
+        return train_fold(
+            data.manifest,
+            data.splits_file,
+            data.directory,
+            fold=0,
+            settings=settings,
+            model_settings=TINY,
+            preprocessing_settings=SETTINGS,
+            augmentation_settings=CROPS,
+            device=CPU,
+            canvas=CANVAS,
+            output_dir=tmp_path / "run",
+            **options,
+        )
+
+    run(COMPOSED, time_limit_minutes=1e-9)
+    other = replace(FAST, composition=BatchComposition(0, 1, 1))
+    with pytest.raises(ValueError, match="composition"):
+        run(other, resume=True)
+    assert run(COMPOSED, resume=True).stop_reason == "finished"

@@ -101,7 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     training = train.add_argument_group("training")
     training.add_argument("--epochs", type=int, default=60)
-    training.add_argument("--batch-size", type=int, default=4)
+    training.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="images per batch (default: 4, or the size of --batch-composition)",
+    )
     training.add_argument("--learning-rate", type=float, default=1e-4)
     training.add_argument(
         "--positive-fraction",
@@ -122,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="with --crop-size: share of the crops of an image with a mass that "
         "contain part of it",
+    )
+    training.add_argument(
+        "--batch-composition",
+        type=int,
+        nargs=3,
+        metavar=("MASS", "NEGATIVE_MASS_IMAGES", "NEGATIVE_NORMAL_IMAGES"),
+        default=None,
+        help="with --crop-size: every batch holds this many patches that contain a "
+        "mass, negative patches from images with a mass and negative patches from "
+        "images without one, for example 4 2 2 (--positive-fraction is then not used)",
     )
     training.add_argument(
         "--samples-per-epoch",
@@ -245,6 +260,7 @@ def _train(args: argparse.Namespace) -> int:
     try:
         from mammo_seg.data.augmentation import AugmentationSettings
         from mammo_seg.data.dataset import canvas_of
+        from mammo_seg.data.loaders import BatchComposition
         from mammo_seg.device import resolve_device
         from mammo_seg.engine.model import ModelSettings
         from mammo_seg.engine.train import TrainingSettings, train_fold
@@ -257,11 +273,20 @@ def _train(args: argparse.Namespace) -> int:
         return 1
     output = args.output_dir / fold_name(args.fold)
     try:
+        composition = (
+            BatchComposition(*args.batch_composition)
+            if args.batch_composition is not None
+            else None
+        )
+        batch_size = args.batch_size
+        if batch_size is None:
+            batch_size = composition.size if composition is not None else 4
         settings = TrainingSettings(
             epochs=args.epochs,
-            batch_size=args.batch_size,
+            batch_size=batch_size,
             learning_rate=args.learning_rate,
             positive_fraction=args.positive_fraction,
+            composition=composition,
             samples_per_epoch=args.samples_per_epoch,
             amp=args.amp,
             selection_metric=args.selection_metric,
