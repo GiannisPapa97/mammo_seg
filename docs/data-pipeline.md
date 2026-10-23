@@ -198,7 +198,7 @@ It reads `data/processed/manifest.json` and writes `data/processed/masks/<file_i
 
 ## 4. Preprocessing
 
-**Goal:** turn a raw 16-bit DICOM into the input of the model, in one chain that training and inference both use: read the DICOM, crop to the breast, rescale so the longer side is 1024 px, flip right breasts, normalize the intensities. Code: `src/mammo_seg/data/preprocessing.py` (the chain) and `src/mammo_seg/data/preprocess_dataset.py` (the cache on disk and the command).
+**Goal:** turn a raw 16-bit DICOM into the input of the model, in one chain that training and inference both use: read the DICOM, crop to the breast, rescale so the longer side is 1024 px and flip right breasts (done once and stored on disk), then normalize the intensities (done each time an image is loaded). Code: `src/mammo_seg/data/preprocessing.py` (the chain) and `src/mammo_seg/data/preprocess_dataset.py` (the cache on disk and the command).
 
 ```bash
 uv run python -m mammo_seg.data.preprocess_dataset            # about 3.5 minutes
@@ -241,11 +241,13 @@ On the real data the box covers a median of 46% of the image (16% to 76%). All 4
 
 The default is a fixed divisor of 4095 (clipped at 1): the images come from one scanner with a 12-bit range, and this keeps absolute intensities. I first planned per-image scaling by the 99.5th percentile of the tissue, but on 80 random images it made the tissue brightness vary more across images (coefficient of variation 6.2%, against 3.6% for the fixed divisor), because the brightest pixels are outliers such as calcifications and bright masses, so the scale would depend on the lesions that are to be segmented. Per-image scaling stays available through `percentile` for data from other scanners.
 
+Most images do not use the whole range. In the 410 preprocessed images the largest value is exactly 4095 and none is above it, but only 12 images reach it: the brightest pixel of an image has a median of 2413 (lowest 1772, 95th percentile 4021). A typical image therefore reaches about 0.6 after normalization.
+
 ### Stored format
 
 Written to `data/processed/preprocessed/`:
 
-- `images/<file_id>.png`: the preprocessed image, 16-bit (values unchanged apart from the averaging of the rescale)
+- `images/<file_id>.png`: the preprocessed image, 16-bit (values unchanged apart from the averaging of the rescale). The values stay in the 12-bit range 0 to 4095 of the scanner, about a sixteenth of what a 16-bit file can hold, so an image viewer that maps 0 to 65535 to black and white shows them dark and flat. Stretch the display range to 0 to 4095 to see them normally; the model is not affected, because the values are divided by 4095 when loaded
 - `masks/<file_id>.png`: its mass mask, 8-bit with the values 0 and 255 (read it with `read_mask`)
 - `preprocessing.json`: the settings and, for every image, `PreprocessParams` (source shape, crop box, result shape, flip)
 

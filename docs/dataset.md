@@ -37,7 +37,7 @@ The Kaggle page lists the license as "Unknown" and has no description. The origi
 
 ### Breast bounding box
 
-The breast covers about a third of each image (threshold on intensity above 100; background is close to 0). Its bounding box covers a median of 44% of the image (range 15% to 75%) and is about 3150 x 1470 px at the median. Cropping to the box before resizing keeps more resolution for the same cost. This is the rough threshold estimate from the exploration; the box used for preprocessing is described in [data-pipeline.md](data-pipeline.md#4-preprocessing) and was checked visually on all 410 images.
+The breast covers about a third of each image (threshold on intensity above 100; background is close to 0), so cropping to its bounding box before resizing keeps more resolution for the same cost. How the box is found, and how much of the image it covers, is in [data-pipeline.md](data-pipeline.md#4-preprocessing).
 
 ## Annotations
 
@@ -122,7 +122,7 @@ Patients (108):
 2. **Very small training set.** 107 positive images from 50 patients. Use cross-validation grouped by patient, report variability across folds, and expect noisy metrics. A pretrained encoder and strong augmentation are likely needed.
 3. **Splitting.**
    - Group by patient id, never by image or breast: both views of a mass, both breasts, and the second exam of 9 patients would otherwise leak.
-   - Stratify at patient level on "has any mass image" (50 positive, 58 negative patients). With 5 folds that is about 10 positive patients and 21 positive images per fold. `StratifiedGroupKFold` from scikit-learn does this.
+   - Stratify at patient level on "has any mass image" (50 positive, 58 negative patients). With 5 folds that is about 10 positive patients and 21 positive images per fold. How the splits are made is in [data-pipeline.md](data-pipeline.md#2-patient-splits).
    - Optional extra balance: image size and BI-RADS.
    - There is no official split. A fixed held-out test set of about 20% of patients would hold only about 10 positive patients, so metrics from it are very noisy. Report cross-validation results and use a test set only as a sanity check.
 4. **Negatives matter.** Of the 410 images, 303 have no mass. Decide whether to train on positives only or on all images, and report lesion-positive and all-image metrics separately. Also report the 67 normal and the 236 other-lesion negatives separately, since they behave differently.
@@ -133,4 +133,4 @@ Patients (108):
 ## Open questions
 
 - Is the Kaggle copy identical to the original release (108 patients here against 115 cases in the publication)?
-- Pixel spacing and bit depth: confirm against `inbreast.pdf`.
+- Pixel spacing: the DICOM headers have none (see Images); confirm it against `inbreast.pdf` if physical sizes are needed.

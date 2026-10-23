@@ -4,7 +4,7 @@ A reproducible PyTorch framework for segmentation of mammography images, startin
 
 > **Research use only.** This project is not a medical device and its output must not be used for clinical decisions.
 
-**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset, patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. The metrics, the loss, the model, checkpoints and the training loop are in place ([docs/training.md](docs/training.md)); no results on a GPU or on the real data are reported yet.
+**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset, patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. The metrics, the loss, the model, checkpoints, the training loop and the evaluation are in place ([docs/training.md](docs/training.md)). Training on all five folds works with crops around the masses, but the model is not yet a useful detector: it beats predicting nothing on the Dice over all images in two of the five folds (a mean Dice of about 0.56 on the images with a mass). The test set has not been used.
 
 ## Development
 
