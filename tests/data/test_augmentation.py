@@ -96,6 +96,54 @@ def test_intensity_changes_leave_the_mask_alone() -> None:
     assert not torch.equal(image, lesion_sample()[0])
 
 
+def flat_zero(image: torch.Tensor) -> torch.Tensor:
+    """The pixels of a ``[1, H, W]`` image whose 5 x 5 neighbourhood is all 0."""
+    zero = (image[0] == 0).float()[None, None]
+    return (torch.nn.functional.avg_pool2d(zero, 5, stride=1) == 1)[0, 0]
+
+
+def test_the_zero_background_stays_zero() -> None:
+    strong = AugmentationSettings(
+        rotation=0, scale=0, shift=0, brightness=0.5, contrast=0.5, gamma=0.5,
+        noise=0.05,
+    )  # fmt: skip
+    for seed in range(10):
+        torch.manual_seed(seed)
+        image, _ = Augmentation(strong)(*breast_sample())
+        breast = breast_sample()[0] > 0
+        assert (image[~breast] == 0).all()
+        assert not torch.equal(image[breast], breast_sample()[0][breast])
+
+
+def test_the_area_brought_in_by_the_geometry_stays_zero() -> None:
+    # The geometric changes draw their random numbers first, so the same seed gives
+    # the same geometry with and without intensity changes.
+    geometry = replace(NOTHING, rotation=30, shift=0.2)
+    everything = replace(geometry, brightness=0.5, contrast=0.5, gamma=0.5, noise=0.05)
+    brought_in = 0
+    for seed in range(10):
+        torch.manual_seed(seed)
+        moved, _ = Augmentation(geometry)(
+            torch.full((1, 64, 48), 0.4), torch.zeros(1, 64, 48)
+        )
+        torch.manual_seed(seed)
+        changed, _ = Augmentation(everything)(
+            torch.full((1, 64, 48), 0.4), torch.zeros(1, 64, 48)
+        )
+        assert (changed[moved == 0] == 0).all()
+        assert not torch.equal(changed[moved > 0], moved[moved > 0])
+        brought_in += int((moved == 0).sum())
+    assert brought_in > 0
+
+
+def test_the_default_augmentation_keeps_a_flat_background() -> None:
+    # Validation images keep their flat zero background; training patches must too.
+    for seed in range(10):
+        torch.manual_seed(seed)
+        image, _ = Augmentation()(*breast_sample())
+        assert flat_zero(image).any()
+
+
 def test_gamma_keeps_the_order_of_intensities() -> None:
     gamma_only = AugmentationSettings(
         rotation=0, scale=0, shift=0, brightness=0, contrast=0, gamma=0.5, noise=0
@@ -253,6 +301,14 @@ def test_a_negative_patch_always_holds_breast_where_random_patches_do_not() -> N
         image, _ = random(*breast_sample())
         background_only += int(not (image > BREAST_THRESHOLD).any())
     assert background_only > 0
+
+
+def test_a_negative_patch_is_centred_on_the_breast_with_intensity_changes() -> None:
+    # Gamma below 1 lifts small values, which could push a noised background above
+    # the breast threshold; the background stays 0, so the centre is always breast.
+    patches = typed("negative", brightness=0.5, contrast=0.5, gamma=0.5, noise=0.05)
+    for image, _ in patches:
+        assert image[0, 8, 8] > BREAST_THRESHOLD
 
 
 def test_the_kind_overrides_the_share_of_patches_around_a_mass() -> None:
