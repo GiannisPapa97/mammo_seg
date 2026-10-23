@@ -2,6 +2,7 @@
 
     mammo-seg manifest | splits | masks | preprocess   # the data pipeline
     mammo-seg train                                    # train a model on one fold
+    mammo-seg evaluate                                 # score trained models
 
 The data steps are the commands of ``mammo_seg.data`` (``python -m
 mammo_seg.data.splits ...`` does the same as ``mammo-seg splits ...``); each takes
@@ -15,6 +16,7 @@ persistent output folder, ``--resume`` continues a session that ended, and
 """
 
 import argparse
+import json
 import logging
 import sys
 from collections.abc import Callable, Iterator, Sequence
@@ -26,8 +28,10 @@ from mammo_seg.data.preprocess_dataset import RECORD_FILE, read_record
 from mammo_seg.data.splits import fold_name, read_splits
 
 DEFAULT_OUTPUT_DIR = Path("runs")
-# The choices of the engine, spelled out because importing the engine imports
-# PyTorch; the tests check that they are the same.
+# The choices and defaults of the engine, spelled out because importing the engine
+# imports PyTorch; the tests check that they are the same.
+DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
+DEFAULT_MIN_AREAS = (0, 100, 300, 1000)
 ARCHITECTURES = ("unet", "unetplusplus", "deeplabv3", "deeplabv3plus", "fpn")
 SELECTION_METRICS = tuple(
     f"{group}.{metric}"
@@ -155,6 +159,69 @@ def build_parser() -> argparse.ArgumentParser:
         default="imagenet",
         help="imagenet downloads pretrained weights the first time (needs internet)",
     )
+
+    evaluate = commands.add_parser(
+        "evaluate",
+        help="score the trained models of the folds (thresholds, minimum region size)",
+        description="Score the checkpoint of each fold on its own validation fold, "
+        "or on the held-out test set, under a grid of thresholds and minimum region "
+        "sizes, next to the baseline of predicting nothing.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    evaluate.add_argument("--manifest", type=Path, default=manifest.DEFAULT_OUTPUT)
+    evaluate.add_argument("--splits", type=Path, default=splits.DEFAULT_OUTPUT)
+    evaluate.add_argument(
+        "--preprocessed-dir", type=Path, default=preprocess_dataset.DEFAULT_OUTPUT_DIR
+    )
+    evaluate.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="where the training runs are: <runs-dir>/fold_<k>/<checkpoint-name>",
+    )
+    evaluate.add_argument("--folds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    evaluate.add_argument(
+        "--checkpoint-name",
+        default="last.pt",
+        help="last.pt (the final epoch) or best.pt (the epoch with the best "
+        "validation score)",
+    )
+    evaluate.add_argument(
+        "--test",
+        action="store_true",
+        help="score the held-out test set instead of the validation folds; do this "
+        "once, at the end, with the setting chosen on the validation folds",
+    )
+    evaluate.add_argument(
+        "--thresholds", type=float, nargs="+", default=list(DEFAULT_THRESHOLDS)
+    )
+    evaluate.add_argument(
+        "--min-areas",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_MIN_AREAS),
+        help="predicted regions with fewer pixels are removed (0: keep all)",
+    )
+    evaluate.add_argument("--batch-size", type=int, default=4)
+    evaluate.add_argument("--num-workers", type=int, default=0)
+    evaluate.add_argument(
+        "--device",
+        default=None,
+        help="auto, cpu, cuda, cuda:<n> or mps (default: $MAMMO_SEG_DEVICE, else auto)",
+    )
+    evaluate.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="mixed precision (used on a CUDA GPU only)",
+    )
+    evaluate.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="the JSON file with all results "
+        "(default: <runs-dir>/evaluation_<validation|test>.json)",
+    )
     return parser
 
 
@@ -247,12 +314,63 @@ def _train(args: argparse.Namespace) -> int:
     return 0
 
 
+def _evaluate(args: argparse.Namespace) -> int:
+    try:
+        from mammo_seg.data.dataset import canvas_of
+        from mammo_seg.device import resolve_device
+        from mammo_seg.engine.evaluate import (
+            evaluate_folds,
+            evaluation_to_dict,
+            format_evaluation,
+            settings_grid,
+        )
+    except ImportError as error:
+        print(
+            f"error: evaluation needs PyTorch and segmentation_models_pytorch "
+            f"({error}); install an extra, see the README",
+            file=sys.stderr,
+        )
+        return 1
+    on = "test" if args.test else "validation"
+    output = args.output or args.runs_dir / f"evaluation_{on}.json"
+    try:
+        record = read_record(args.preprocessed_dir / RECORD_FILE)
+        evaluation = evaluate_folds(
+            manifest.read_manifest(args.manifest),
+            read_splits(args.splits),
+            args.preprocessed_dir,
+            args.runs_dir,
+            args.folds,
+            settings_grid(args.thresholds, args.min_areas),
+            record.settings,
+            checkpoint_name=args.checkpoint_name,
+            test=args.test,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            device=resolve_device(args.device),
+            amp=args.amp,
+            canvas=canvas_of(record),
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(evaluation_to_dict(evaluation), indent=2) + "\n")
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.test:
+        print(
+            "TEST SET: use this once, with the setting chosen on the validation folds."
+        )
+    print(format_evaluation(evaluation))
+    print(f"\nAll results are in {output}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in STEPS:
         return STEPS[arguments[0]][1](arguments[1:])
     args = build_parser().parse_args(arguments)
-    return _train(args)
+    return _evaluate(args) if args.command == "evaluate" else _train(args)
 
 
 if __name__ == "__main__":

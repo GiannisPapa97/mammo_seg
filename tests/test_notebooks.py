@@ -12,6 +12,8 @@ from mammo_seg import cli
 
 NOTEBOOKS = sorted(Path("notebooks").glob("*.ipynb"))
 KAGGLE = Path("notebooks/05_kaggle_training.ipynb")
+EVALUATION = Path("notebooks/06_kaggle_evaluation.ipynb")
+DATA_STEPS = {"manifest", "splits", "masks", "preprocess"}
 
 
 def read(notebook: Path) -> dict[str, Any]:
@@ -60,12 +62,16 @@ def test_a_notebook_is_valid_and_has_no_outputs(notebook: Path) -> None:
             assert cell["outputs"] == [] and cell["execution_count"] is None
 
 
-def test_the_kaggle_notebook_uses_options_that_exist(
-    capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize(
+    ("notebook", "steps"),
+    [(KAGGLE, DATA_STEPS | {"train"}), (EVALUATION, DATA_STEPS | {"evaluate"})],
+    ids=lambda value: value.name if isinstance(value, Path) else "",
+)
+def test_the_kaggle_notebooks_use_options_that_exist(
+    notebook: Path, steps: set[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    mammo_seg = [c for c in commands(KAGGLE) if c.startswith("mammo-seg ")]
-    steps = {"manifest", "splits", "masks", "preprocess", "train"}
-    assert steps <= {c.split()[1] for c in mammo_seg}
+    mammo_seg = [c for c in commands(notebook) if c.startswith("mammo-seg ")]
+    assert steps == {c.split()[1] for c in mammo_seg}
     for command in mammo_seg:
         name = command.split()[1]
         used = set(re.findall(r"--[a-z][a-z-]*", command))
@@ -79,12 +85,39 @@ def test_the_kaggle_notebook_settings_are_valid() -> None:
     cli.build_parser().parse_args(["train", *shlex.split(settings["TRAIN_OPTIONS"])])
 
 
+def test_the_evaluation_notebook_settings_are_valid() -> None:
+    settings = settings_of(EVALUATION, "FOLDS", "EVALUATE_OPTIONS")
+    assert settings["FOLDS"] and set(settings["FOLDS"]) <= set(range(5))
+    cli.build_parser().parse_args(
+        ["evaluate", *shlex.split(settings["EVALUATE_OPTIONS"])]
+    )
+
+
+def test_the_extra_options_of_the_evaluation_cannot_override_the_folds() -> None:
+    (evaluate,) = [
+        c for c in commands(EVALUATION) if c.startswith("mammo-seg evaluate ")
+    ]
+    assert evaluate.index("{EVALUATE_OPTIONS}") < evaluate.index("--folds {folds}")
+
+
+def test_the_evaluation_does_not_write_into_the_read_only_inputs() -> None:
+    (evaluate,) = [
+        c for c in commands(EVALUATION) if c.startswith("mammo-seg evaluate ")
+    ]
+    assert "--output {OUTPUT}" in evaluate
+    code = "".join("".join(c["source"]) for c in read(EVALUATION)["cells"])
+    assert 'OUTPUT = WORK / f"evaluation_' in code  # WORK is /kaggle/working
+
+
 def test_the_options_of_the_notebook_cannot_override_the_fold_or_the_time() -> None:
     (train,) = [c for c in commands(KAGGLE) if c.startswith("mammo-seg train ")]
     assert train.index("{TRAIN_OPTIONS}") < train.index("--fold {fold}")
     assert train.index("{TRAIN_OPTIONS}") < train.index("--max-minutes {minutes}")
 
 
-def test_the_repository_is_not_cloned_where_it_would_hide_the_package() -> None:
-    source = KAGGLE.read_text()
+@pytest.mark.parametrize("notebook", [KAGGLE, EVALUATION], ids=lambda p: p.name)
+def test_the_repository_is_not_cloned_where_it_would_hide_the_package(
+    notebook: Path,
+) -> None:
+    source = notebook.read_text()
     assert 'WORK / "mammo_seg"' not in source and "/mammo_seg " not in source
