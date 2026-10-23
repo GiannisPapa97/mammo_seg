@@ -15,8 +15,9 @@ would show the model breasts it never sees at inference.
 
 A crop can also be asked for by kind, to build batches of a known composition: a
 ``"mass"`` patch contains at least one mass pixel (when the image still has one) and
-a ``"negative"`` patch contains none and is centred on the breast, so it is not just
-background. Without a kind the patch is placed as described above.
+a ``"negative"`` patch contains none, when a patch can avoid the mass, and is centred
+on the breast, so it is not just background. Without a kind the patch is placed as
+described above.
 
 Augmentation is only for training. It uses PyTorch's random number generator, so
 seeding PyTorch (the data loaders do) makes it reproducible.
@@ -37,8 +38,11 @@ PatchKind = Literal["mass", "negative"]
 # threshold of the preprocessing, 100 of 4095, rounded up; on the INbreast images
 # the two differ on 0.1% of the breast pixels.
 BREAST_THRESHOLD = 0.05
-# Tries to place a negative patch where it holds no mass pixel; if all fail (a mass
-# that fills the breast), the try with the fewest mass pixels is used.
+# Tries to place a negative patch where it holds no mass pixel; if all fail, the try
+# with the fewest mass pixels is used. All can fail whenever the patch is large
+# against the image, for example a mass in the middle rows of a narrow image seen
+# through a patch half as high as the image, so such a patch can hold a sliver of
+# the mass.
 NEGATIVE_TRIES = 20
 
 

@@ -339,7 +339,7 @@ Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every
 With a crop, a patch can also be asked for by kind (`Augmentation(image, mask, kind)`, or `dataset[(index, kind)]`):
 
 - `"mass"`: the patch contains at least one mass pixel, placed at a random place of the patch. If the geometric changes pushed the mass out of the image, the patch is placed at random.
-- `"negative"`: the patch contains no mass pixel and is centred on a random breast pixel (brighter than 0.05 on the 0..1 scale, which is the preprocessing threshold of 100 of 4095 rounded up), so it is not just background. A patch that holds a mass pixel is drawn again, up to 20 times; if none is free (a mass that fills the breast), the one with the fewest mass pixels is used.
+- `"negative"`: the patch contains no mass pixel and is centred on a random breast pixel (brighter than 0.05 on the 0..1 scale, which is the preprocessing threshold of 100 of 4095 rounded up), so it is not just background. A patch that holds a mass pixel is drawn again, up to 20 times; if none is free, the one with the fewest mass pixels is used, so a negative patch can hold a sliver of a mass. This happens when the patch is large against the image: a 512 px patch is half the height of a preprocessed image and, for an image narrower than 512 px, as wide as it, so no patch avoids a mass in the middle rows. Measured on fold 0 with 512 px patches (one epoch, 128 negative patches of images with a mass), 19% to 22% of them held mass pixels, a median of 0.23% of the patch (at most 10.4%); the negative patches of images without a mass never did.
 
 `crop_mass_fraction` only applies without a kind.
 
