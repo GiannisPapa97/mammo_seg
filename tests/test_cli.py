@@ -8,6 +8,7 @@ from tests.data.preprocessed import SETTINGS
 from tests.project import Project, make_project
 
 from mammo_seg import cli
+from mammo_seg.data.loaders import BatchComposition
 from mammo_seg.data.manifest import write_manifest
 from mammo_seg.data.splits import create_splits_file, write_splits
 from mammo_seg.engine import evaluate as evaluate_module
@@ -46,7 +47,7 @@ def test_the_choices_are_those_of_the_engine() -> None:
 
 def test_the_defaults_are_the_agreed_training_settings() -> None:
     args = cli.build_parser().parse_args(["train"])
-    assert (args.epochs, args.batch_size, args.learning_rate) == (60, 4, 1e-4)
+    assert (args.epochs, args.batch_size, args.learning_rate) == (60, None, 1e-4)
     assert (args.patience, args.positive_fraction, args.fold) == (15, 0.5, 0)
     assert args.selection_metric == "all_images.dice" and args.amp
     assert args.architecture == "unet" and args.encoder == "resnet34"
@@ -58,6 +59,7 @@ def test_the_defaults_are_the_agreed_training_settings() -> None:
 def test_training_on_whole_images_is_the_default() -> None:
     args = cli.build_parser().parse_args(["train"])
     assert args.crop_size is None and args.crop_mass_fraction == 0.5
+    assert args.batch_composition is None
 
 
 def test_mixed_precision_can_be_switched_off() -> None:
@@ -188,6 +190,75 @@ def test_the_crop_options_become_augmentation_settings(
     assert (
         augmentation.crop_size == (32, 32) and augmentation.crop_mass_fraction == 0.75
     )
+
+
+def without_batch_size(arguments: list[str]) -> list[str]:
+    position = arguments.index("--batch-size")
+    return arguments[:position] + arguments[position + 2 :]
+
+
+def captured_settings(monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> Any:
+    calls: list[tuple[Any, ...]] = []
+
+    def fake(*args: Any, **kwargs: Any) -> TrainingResult:
+        calls.append(args)
+        return result()
+
+    monkeypatch.setattr(train_module, "train_fold", fake)
+    assert cli.main(arguments) == 0
+    return calls[0][4]
+
+
+def test_the_batch_size_defaults_to_4(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = without_batch_size(project.train_args(*TINY))
+    settings = captured_settings(monkeypatch, arguments)
+    assert settings.batch_size == 4 and settings.composition is None
+
+
+def test_a_batch_composition_sets_the_batch_size(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = ["--crop-size", "32", "--batch-composition", "3", "1", "2", *TINY]
+    arguments = without_batch_size(project.train_args(*options))
+    settings = captured_settings(monkeypatch, arguments)
+    assert settings.composition == BatchComposition(3, 1, 2)
+    assert settings.batch_size == 6
+
+
+def test_a_batch_size_that_is_not_the_composition_is_an_error(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = ["--crop-size", "32", "--batch-composition", "3", "1", "2", *TINY]
+    assert cli.main(project.train_args(*options)) == 1  # --batch-size 2
+    assert "batch size is 2 but the composition" in capsys.readouterr().err
+
+
+def test_a_batch_composition_without_crops_is_an_error(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = ["--batch-composition", "1", "0", "1", *TINY]
+    assert cli.main(project.train_args(*options)) == 1
+    assert "made of patches" in capsys.readouterr().err
+
+
+def test_a_run_with_a_batch_composition_trains(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = [
+        "--crop-size",
+        "32",
+        "--batch-composition",
+        "1",
+        "0",
+        "1",
+        "--epochs",
+        "1",
+    ]
+    assert cli.main(project.train_args(*options, "--no-amp", *TINY)) == 0
+    assert "Training ended after 1 epochs (finished)" in capsys.readouterr().out
+    assert (project.output / "fold_0" / "last.pt").is_file()
 
 
 def test_a_crop_size_of_zero_is_an_error(

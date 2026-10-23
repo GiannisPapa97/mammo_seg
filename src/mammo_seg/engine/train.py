@@ -4,7 +4,8 @@
 patient-level splits and calls ``fit``, which alternates an epoch of training with
 a pass of validation:
 
-- training draws batches balanced between images with and without a mass
+- training draws batches balanced between images with and without a mass, or, with
+  a ``BatchComposition``, batches of a fixed make-up of patches
   (``loaders.training_loader``) and minimizes ``DiceBCELoss`` with Adam, with a
   learning rate that follows a cosine curve down to 0 over the epochs
 - validation runs on every image of the validation fold once and computes the
@@ -37,10 +38,10 @@ import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 import torch
-from pydantic import ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from torch import nn
 from torch.optim import Adam
@@ -55,7 +56,7 @@ from mammo_seg.data.dataset import (
     Sample,
 )
 from mammo_seg.data.folds import fold_ids
-from mammo_seg.data.loaders import evaluation_loader, training_loader
+from mammo_seg.data.loaders import BatchComposition, evaluation_loader, training_loader
 from mammo_seg.data.preprocessing import PreprocessingSettings
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile
@@ -86,6 +87,9 @@ class TrainingSettings:
     learning_rate: Annotated[float, Field(gt=0)] = 1e-4  # at the start; cosine decay
     # Share of images with a mass in a training batch; None draws every image once.
     positive_fraction: Annotated[float, Field(gt=0, lt=1)] | None = 0.5
+    # Every batch holds this many patches of each kind, instead of the draw above
+    # (which is then not used). It needs crops and a batch size equal to its size.
+    composition: BatchComposition | None = None
     # Images drawn per epoch; None means as many as there are training images.
     samples_per_epoch: Annotated[int, Field(ge=1)] | None = None
     amp: bool = True  # mixed precision, used on a CUDA GPU only
@@ -107,6 +111,15 @@ class TrainingSettings:
                 f"{', '.join(SELECTION_METRICS)}"
             )
         return name
+
+    @model_validator(mode="after")
+    def _batch_matches_composition(self) -> Self:
+        if self.composition is not None and self.composition.size != self.batch_size:
+            raise ValueError(
+                f"the batch size is {self.batch_size} but the composition "
+                f"{self.composition} has {self.composition.size} patches"
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -540,8 +553,13 @@ def train_fold(
     ``device`` defaults to ``resolve_device()``. ``resume`` and
     ``time_limit_minutes`` are those of ``fit``. Raises ValueError for a fold
     outside the splits, splits made from another manifest, preprocessed data
-    made with other settings, or a checkpoint that cannot be resumed.
+    made with other settings, a composition without crops, or a checkpoint that
+    cannot be resumed.
     """
+    if settings.composition is not None and augmentation_settings.crop_size is None:
+        raise ValueError(
+            "batches with a composition are made of patches: set the crop size"
+        )
     device = device or resolve_device()
     ids = fold_ids(manifest, splits_file, fold)
     train_data = MammogramDataset(
@@ -564,6 +582,7 @@ def train_fold(
         settings.samples_per_epoch,
         settings.num_workers,
         settings.seed,
+        settings.composition,
     )
     validation_loader = evaluation_loader(
         validation_data, settings.batch_size, settings.num_workers
