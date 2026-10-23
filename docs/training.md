@@ -145,6 +145,21 @@ The data steps are the same commands as `python -m mammo_seg.data.<step>`: `mamm
 
 On Kaggle, use [notebooks/05_kaggle_training.ipynb](../notebooks/05_kaggle_training.ipynb). Its first cell holds the experiment: the folds (`FOLDS`), the time shared by them (`MAX_MINUTES`) and any other `mammo-seg train` options (`TRAIN_OPTIONS`, set to the crop settings that worked, see below; `FOLDS` is `[0]`, use `[0, 1, 2, 3, 4]` for all five). The next cells install the package, rebuild the manifest, splits, masks and preprocessed images from the attached INbreast dataset (a few minutes, so nothing derived has to be uploaded), train each fold with the time that is left, and print the best epoch of each. To continue in a later session, save a version, add its output as an input and set `PREVIOUS_RUNS`; a fold with a `last.pt` is resumed and a finished fold returns at once. The notebook asks for `--device cuda`, so a notebook without a GPU stops with an error.
 
+### Evaluating a trained model
+
+`mammo-seg evaluate` (`engine/evaluate.py`) scores the checkpoint of each fold, `<runs-dir>/fold_<k>/last.pt` by default (`--checkpoint-name best.pt` for the best epoch), on the images that model did not train on: its own validation fold, or with `--test` the held-out test set. Scoring every validation fold with its own model gives out-of-fold predictions for all development images, and the results of the folds are pooled by putting the per-image scores together.
+
+```bash
+mammo-seg evaluate --runs-dir runs                       # all five folds, a grid of settings
+mammo-seg evaluate --runs-dir runs --folds 0 1 --thresholds 0.4 0.5 --min-areas 0 500
+```
+
+Each probability map is turned into a prediction under every combination of a **threshold** (0.3 to 0.7 by default) and a **minimum region size** (0, 100, 300 and 1000 pixels by default): connected regions (8-connectivity) of predicted pixels smaller than the minimum are removed, so a stray spot of a few pixels no longer makes a false alarm. For each setting the table gives the metrics of section 1 on images with a mass, the false-alarm rate with that rule, the mean number of predicted pixels on images without a mass (`FP pixels`), the Dice over all images, and the **balanced Dice**: the mean of the Dice on images with a mass and on images without one, so both kinds count equally. A row for the baseline of **predicting nothing** is always printed, since it scores the share of images without a mass on the all-images Dice. `*` marks the best balanced Dice, and the folds are shown at that setting. Everything is also written to `<runs-dir>/evaluation_validation.json` (or `_test.json`; `--output` changes it).
+
+- A checkpoint trained for another fold, or on images preprocessed with other settings, is refused.
+- Choosing the setting on the validation predictions tunes it on data it was scored on, so it is slightly optimistic. Choose one setting for all folds (not one per fold, which would fit 15 to 19 images with a mass each), then score the test set once.
+- The command runs on a CPU, but a GPU is much faster. On Kaggle use [notebooks/06_kaggle_evaluation.ipynb](../notebooks/06_kaggle_evaluation.ipynb) with the saved output of the training notebook as an input.
+
 ### What has and has not been tried
 
 - Tested on the CPU with synthetic images (CI does the same): the loop, checkpoints, stopping, resuming and the command, including a run through the command that learns a synthetic mass.
@@ -183,6 +198,6 @@ On Kaggle, use [notebooks/05_kaggle_training.ipynb](../notebooks/05_kaggle_train
 
 ## Next steps
 
-- An `evaluate` command that scores a checkpoint on a validation fold or the test set, with a threshold and a minimum region size, a false-alarm measure that ignores tiny regions, and the baseline of predicting nothing. It should show whether the false alarms can be reduced without retraining.
+- Run `mammo-seg evaluate` on the five trained folds to see whether the false alarms can be reduced without retraining (not run on real checkpoints yet).
 - Judge the folds by the converged values and the paired differences between settings, not by the best epoch. Change one thing at a time.
 - Evaluation on the held-out test set, with the simple baselines the protocol calls for.

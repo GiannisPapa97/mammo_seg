@@ -9,8 +9,11 @@ from tests.project import Project, make_project
 
 from mammo_seg import cli
 from mammo_seg.data.manifest import write_manifest
+from mammo_seg.data.splits import create_splits_file, write_splits
+from mammo_seg.engine import evaluate as evaluate_module
 from mammo_seg.engine import train as train_module
-from mammo_seg.engine.model import Architecture
+from mammo_seg.engine.checkpoint import save_checkpoint
+from mammo_seg.engine.model import Architecture, ModelSettings, build_model
 from mammo_seg.engine.train import SELECTION_METRICS, TrainingResult
 
 TINY = ["--encoder", "tu-mobilenetv3_small_050", "--encoder-weights", "none"]
@@ -36,6 +39,8 @@ def result(**overrides: Any) -> TrainingResult:
 
 def test_the_choices_are_those_of_the_engine() -> None:
     assert cli.SELECTION_METRICS == SELECTION_METRICS
+    assert cli.DEFAULT_THRESHOLDS == evaluate_module.DEFAULT_THRESHOLDS
+    assert cli.DEFAULT_MIN_AREAS == evaluate_module.DEFAULT_MIN_AREAS
     assert cli.ARCHITECTURES == get_args(Architecture)
 
 
@@ -261,3 +266,116 @@ def test_a_missing_input_is_an_error_message(
     project.manifest.unlink()
     assert cli.main(project.train_args(*TINY)) == 1
     assert capsys.readouterr().err.startswith("error:")
+
+
+# --- evaluating ---
+
+SMALL = ModelSettings(encoder="tu-mobilenetv3_small_050", encoder_weights=None)
+
+
+def evaluate_args(project: Project, *extra: str) -> list[str]:
+    return [
+        "evaluate",
+        "--manifest",
+        str(project.manifest),
+        "--splits",
+        str(project.splits),
+        "--preprocessed-dir",
+        str(project.preprocessed),
+        "--runs-dir",
+        str(project.output),
+        "--device",
+        "cpu",
+        "--batch-size",
+        "2",
+        "--thresholds",
+        "0.5",
+        "--min-areas",
+        "0",
+        "50",
+        *extra,
+    ]
+
+
+def save_runs(project: Project, folds: tuple[int, ...] = (0, 1)) -> None:
+    for fold in folds:
+        save_checkpoint(
+            project.output / f"fold_{fold}" / "last.pt",
+            build_model(SMALL),
+            SMALL,
+            SETTINGS,
+            metadata={"fold": fold},
+        )
+
+
+def test_the_evaluate_defaults_cover_the_five_folds() -> None:
+    args = cli.build_parser().parse_args(["evaluate"])
+    assert args.folds == [0, 1, 2, 3, 4] and args.checkpoint_name == "last.pt"
+    assert args.thresholds == list(cli.DEFAULT_THRESHOLDS)
+    assert args.min_areas == list(cli.DEFAULT_MIN_AREAS)
+    assert not args.test and args.output is None and args.runs_dir == Path("runs")
+
+
+def test_evaluate_prints_the_sweep_and_writes_the_results(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    save_runs(project)
+    assert cli.main(evaluate_args(project, "--folds", "0", "1")) == 0
+    out = capsys.readouterr().out
+    assert "last.pt on the validation images (16 scored, 2 fold(s) pooled)" in out
+    assert "predict nothing" in out and "TEST SET" not in out
+    results = project.output / "evaluation_validation.json"
+    assert results.is_file() and str(results) in out
+    assert '"on": "validation"' in results.read_text()
+
+
+def test_evaluate_can_write_the_results_elsewhere(
+    project: Project, tmp_path: Path
+) -> None:
+    save_runs(project)
+    target = tmp_path / "somewhere" / "results.json"
+    code = cli.main(evaluate_args(project, "--folds", "0", "--output", str(target)))
+    assert code == 0 and target.is_file()
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--folds", "0", "2"], "not a readable checkpoint"),
+        (["--folds", "0", "0"], "once each"),
+        (["--test", "--folds", "0"], "no test set"),
+        (["--thresholds", "1.5"], "threshold"),
+        (["--checkpoint-name", "best.pt", "--folds", "0"], "not a readable"),
+    ],
+)
+def test_a_bad_evaluation_is_an_error_message_not_a_traceback(
+    project: Project,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+    message: str,
+) -> None:
+    save_runs(project)
+    assert cli.main(evaluate_args(project, *extra)) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_evaluating_without_pytorch_is_a_clear_error(
+    project: Project,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setitem(sys.modules, "mammo_seg.engine.evaluate", None)
+    assert cli.main(evaluate_args(project)) == 1
+    assert "evaluation needs PyTorch" in capsys.readouterr().err
+
+
+def test_scoring_the_test_set_says_it_should_be_done_once(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = make_manifest(4, 4, per_patient=2)
+    write_splits(create_splits_file(manifest, 2, test_fraction=0.25), project.splits)
+    save_runs(project)
+    assert cli.main(evaluate_args(project, "--test", "--folds", "0", "1")) == 0
+    out = capsys.readouterr().out
+    assert "TEST SET: use this once" in out and "on the test images" in out
+    assert (project.output / "evaluation_test.json").is_file()
