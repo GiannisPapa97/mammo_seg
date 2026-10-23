@@ -17,8 +17,10 @@ from mammo_seg.data.splits import (
     main,
     manifest_fingerprint,
     read_splits,
+    strata_summary,
     write_splits,
 )
+from mammo_seg.data.strata import Stratification
 
 
 def valid_splits() -> Splits:
@@ -31,11 +33,20 @@ def valid_splits() -> Splits:
 
 def valid_file(**changes: object) -> SplitsFile:
     fields: dict[str, object] = {
-        "version": 1,
+        "version": 2,
         "manifest_fingerprint": "0" * 64,
         "seed": 0,
         "n_folds": 2,
         "test_fraction": 0.2,
+        "stratification": Stratification(),
+        "strata": {
+            "t1": "mass/small/dense",
+            "t2": "no_mass/fatty",
+            "a1": "mass/small/dense",
+            "a2": "no_mass/fatty",
+            "b1": "mass/small/dense",
+            "b2": "no_mass/fatty",
+        },
         "splits": valid_splits(),
     }
     return SplitsFile(**{**fields, **changes})  # type: ignore[arg-type]
@@ -65,7 +76,20 @@ def test_create_splits_file_records_how_the_splits_were_made() -> None:
     assert splits_file.test_fraction == 0.2
     assert splits_file.manifest_fingerprint == manifest_fingerprint(manifest)
     assert len(splits_file.splits.folds) == 5
+    assert splits_file.stratification == Stratification()
+    assert splits_file.strata == {
+        patient_id: "mass/small/fatty" if index < 20 else "no_mass/fatty"
+        for index, patient_id in enumerate(sorted(splits_file.strata))
+    }
+    assert len(splits_file.strata) == 50
     assert create_splits_file(manifest, 5).seed == DEFAULT_SEED
+
+
+def test_the_stratification_settings_are_recorded() -> None:
+    settings = Stratification(small_mass_mm2=0.01)  # the 0.06 mm² test masses are large
+    splits_file = create_splits_file(make_manifest(20, 30), 5, stratification=settings)
+    assert splits_file.stratification == settings
+    assert "mass/large/fatty" in splits_file.strata.values()
 
 
 def test_a_splits_file_round_trips_through_json(tmp_path: Path) -> None:
@@ -80,7 +104,14 @@ def test_a_splits_file_round_trips_through_json(tmp_path: Path) -> None:
         "seed",
         "n_folds",
         "test_fraction",
+        "stratification",
+        "strata",
         "splits",
+    ]
+    assert list(data["stratification"]) == [
+        "pixel_size_mm",
+        "small_mass_mm2",
+        "dense_acr",
     ]
     assert list(data["splits"]) == ["test_patients", "folds", "excluded_images"]
 
@@ -98,8 +129,11 @@ def test_splits_of_another_manifest_are_refused() -> None:
 
 
 def test_a_file_without_a_test_set_has_no_test_fraction() -> None:
+    strata = {"a1": "mass", "a2": "no_mass", "b1": "mass", "b2": "no_mass"}
     splits_file = valid_file(
-        test_fraction=None, splits=replace(valid_splits(), test_patients=())
+        test_fraction=None,
+        strata=strata,
+        splits=replace(valid_splits(), test_patients=()),
     )
     assert splits_file.test_fraction is None
 
@@ -107,12 +141,13 @@ def test_a_file_without_a_test_set_has_no_test_fraction() -> None:
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
-        ({"version": 2}, "version"),
+        ({"version": 1}, "version"),  # made before the stratification by strata
         ({"n_folds": 3}, "n_folds is 3 but there are 2 folds"),
         ({"test_fraction": 1.5}, "between 0 and 1"),
         ({"test_fraction": None}, "exactly when a test fraction"),
         ({"manifest_fingerprint": 5}, "manifest_fingerprint"),
         ({"seed": "0"}, "seed"),
+        ({"strata": {"t1": "mass"}}, "exactly the patients of the splits"),
     ],
 )
 def test_an_inconsistent_splits_file_is_rejected(
@@ -124,7 +159,10 @@ def test_an_inconsistent_splits_file_is_rejected(
 
 def test_a_test_set_without_a_test_fraction_is_rejected() -> None:
     with pytest.raises(ValidationError, match="exactly when a test fraction"):
-        valid_file(splits=replace(valid_splits(), test_patients=()))
+        valid_file(
+            strata={"a1": "mass", "a2": "no_mass", "b1": "mass", "b2": "no_mass"},
+            splits=replace(valid_splits(), test_patients=()),
+        )
 
 
 @pytest.mark.parametrize(
@@ -147,6 +185,26 @@ def test_inconsistent_splits_are_rejected(
     }
     with pytest.raises(ValidationError, match=message):
         Splits(**{**fields, **splits})  # type: ignore[arg-type]
+
+
+def test_a_file_of_the_first_version_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "splits.json"
+    write_splits(create_splits_file(make_manifest(20, 30), 5), path)
+    data = json.loads(path.read_text())
+    old = {key: data[key] for key in data if key not in ("stratification", "strata")}
+    path.write_text(json.dumps({**old, "version": 1}))
+    with pytest.raises(ValidationError, match="version"):
+        read_splits(path)
+
+
+def test_the_strata_summary_counts_patients_per_set_and_stratum() -> None:
+    splits_file = create_splits_file(make_manifest(20, 30), 5, test_fraction=0.2)
+    summary = strata_summary(splits_file)
+    assert list(summary.columns) == ["mass/small/fatty", "no_mass/fatty", "total"]
+    assert list(summary.index) == [*(f"fold_{i}" for i in range(5)), "test", "total"]
+    assert summary.loc["total", "total"] == 50
+    assert summary.loc["test", "mass/small/fatty"] == 4
+    assert summary.loc["total", "mass/small/fatty"] == 20
 
 
 def test_a_file_with_an_extra_field_is_rejected(tmp_path: Path) -> None:
@@ -182,6 +240,7 @@ def test_main_writes_the_splits_and_prints_a_summary(
     assert f"Wrote {output}" in text
     assert "fold_0" in text and "fold_4" in text
     assert "test" not in text.split("\n", 1)[1]
+    assert "Patients per stratum" in text and "no_mass/fatty" in text
     splits_file = read_splits(output)
     assert splits_file.n_folds == 5
     assert splits_file.test_fraction is None
@@ -218,7 +277,7 @@ def test_main_is_reproducible(manifest_path: Path, tmp_path: Path) -> None:
     [
         (["--folds", "1"], "at least 2 folds"),
         (["--folds", "5", "--test-fraction", "1.5"], "between 0 and 1"),
-        (["--folds", "40"], "one class has only"),
+        (["--folds", "40"], "has only"),
     ],
 )
 def test_main_reports_invalid_arguments_and_writes_nothing(

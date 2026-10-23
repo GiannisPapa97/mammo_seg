@@ -11,12 +11,12 @@ from mammo_seg.data.splits import (
     Splits,
     fold_name,
     make_splits,
-    patients_of,
+    patient_groups,
     select_images,
     split_summary,
     splits_frame,
 )
-from mammo_seg.data.splitting import Patient
+from mammo_seg.data.strata import Stratification
 
 
 def test_select_images_drops_the_excluded_views() -> None:
@@ -37,16 +37,15 @@ def test_a_patient_has_a_mass_if_any_image_has_one() -> None:
         make_image(4, 2),
         make_image(5, 2),
     ]
-    assert patients_of(images) == [Patient(pid(1), True), Patient(pid(2), False)]
+    assert patient_groups(images) == {
+        pid(1): ("mass", "small", "fatty"),
+        pid(2): ("no_mass", "fatty"),
+    }
 
 
 def test_patients_are_sorted_by_id() -> None:
     images = [make_image(1, 9), make_image(2, 3), make_image(3, 5)]
-    assert [patient.patient_id for patient in patients_of(images)] == [
-        pid(3),
-        pid(5),
-        pid(9),
-    ]
+    assert list(patient_groups(images)) == [pid(3), pid(5), pid(9)]
 
 
 def test_splits_without_a_test_set_put_every_patient_in_a_fold() -> None:
@@ -106,7 +105,10 @@ def test_a_mass_only_in_an_excluded_image_does_not_make_the_patient_positive() -
         make_image(3, 2),
     ]
     selected = select_images(Manifest(version=1, images=tuple(images)))
-    assert patients_of(selected) == [Patient(pid(1), False), Patient(pid(2), False)]
+    assert patient_groups(selected) == {
+        pid(1): ("no_mass", "fatty"),
+        pid(2): ("no_mass", "fatty"),
+    }
 
 
 def test_a_patient_with_only_excluded_images_is_not_split() -> None:
@@ -147,12 +149,14 @@ def test_invalid_arguments_are_rejected() -> None:
     manifest = make_manifest(20, 30)
     with pytest.raises(ValueError, match="at least 2 folds"):
         make_splits(manifest, 1)
+    with pytest.raises(ValueError, match="at least 2 folds"):
+        make_splits(manifest, 0, test_fraction=0.2)
     with pytest.raises(ValueError, match="between 0 and 1"):
         make_splits(manifest, 5, test_fraction=1.5)
 
 
 def test_too_few_patients_with_a_mass_are_rejected() -> None:
-    with pytest.raises(ValueError, match="one class has only 3 patient"):
+    with pytest.raises(ValueError, match="stratum 'mass' has only 3 patient"):
         make_splits(make_manifest(3, 30), 5)
 
 
@@ -195,3 +199,90 @@ def test_splits_are_immutable_and_strictly_typed() -> None:
         splits.folds = ()  # type: ignore[misc]
     with pytest.raises(ValueError, match="folds"):
         Splits(test_patients=(), folds=[["a"]], excluded_images=())  # type: ignore[arg-type]
+
+
+# --- stratification ---
+
+# Patients of the real dataset per stratum (108 patients).
+REAL_STRATA = {
+    ("no_mass", "fatty"): 39,
+    ("no_mass", "dense"): 19,
+    ("mass", "large", "fatty"): 25,
+    ("mass", "small", "fatty"): 12,
+    ("mass", "large", "dense"): 7,
+    ("mass", "small", "dense"): 6,
+}
+
+
+def stratified_manifest(counts: dict[tuple[str, ...], int]) -> Manifest:
+    """Two images per patient (CC and MLO); a mass shows in both views."""
+    images = []
+    patient = 0
+    for group, count in counts.items():
+        for _ in range(count):
+            has_mass = group[0] == "mass"
+            options = {
+                "acr": 3 if group[-1] == "dense" else 1,
+                "masses": 1 if has_mass else 0,
+                "mass_mm2": (50.0 if group[1] == "small" else 400.0)
+                if has_mass
+                else None,
+            }
+            images += [
+                make_image(2 * patient, patient, view=View.CC, **options),  # type: ignore[arg-type]
+                make_image(2 * patient + 1, patient, view=View.MLO, **options),  # type: ignore[arg-type]
+            ]
+            patient += 1
+    return Manifest(version=1, images=tuple(images))
+
+
+def strata_per_set(manifest: Manifest, splits: Splits) -> dict[str, dict[str, int]]:
+    groups = patient_groups(select_images(manifest))
+    found: dict[str, dict[str, int]] = {}
+    for patient_id, split in splits.split_of_patient().items():
+        name = "/".join(groups[patient_id])
+        found.setdefault(name, {}).setdefault(split, 0)
+        found[name][split] += 1
+    return found
+
+
+def test_every_set_gets_a_similar_mix_of_strata() -> None:
+    manifest = stratified_manifest(REAL_STRATA)
+    splits = make_splits(manifest, 5, test_fraction=0.2)
+    sets = [TEST, *(fold_name(i) for i in range(5))]
+    for stratum, per_set in strata_per_set(manifest, splits).items():
+        counts = [per_set.get(name, 0) for name in sets]
+        total = sum(counts)
+        assert min(counts) >= 1, stratum  # every stratum reaches every set
+        assert abs(counts[0] - 0.2 * total) <= 1, stratum  # about 20% in the test set
+        assert max(counts[1:]) - min(counts[1:]) <= 1, stratum  # even over the folds
+
+
+def test_a_stratum_too_small_for_the_sets_is_merged_before_splitting() -> None:
+    counts = {**REAL_STRATA, ("mass", "small", "dense"): 2}  # too few for 6 sets
+    manifest = stratified_manifest(counts)
+    splits = make_splits(manifest, 5, test_fraction=0.2)
+    per_set = strata_per_set(manifest, splits)
+    small = [
+        per_set["mass/small/dense"].get(name, 0)
+        + per_set["mass/small/fatty"].get(name, 0)
+        for name in [TEST, *(fold_name(i) for i in range(5))]
+    ]
+    assert min(small) >= 1  # merged, the small masses still reach every set
+    assert sum(small) == 14
+
+
+def test_the_stratification_settings_change_the_strata() -> None:
+    manifest = stratified_manifest(
+        {("mass", "large", "fatty"): 10, ("no_mass", "fatty"): 10}
+    )
+    big = Stratification(small_mass_mm2=1000.0)  # the 400 mm² masses become small
+    assert set(
+        map("/".join, patient_groups(select_images(manifest), big).values())
+    ) == {
+        "mass/small/fatty",
+        "no_mass/fatty",
+    }
+    assert make_splits(manifest, 2, stratification=big) != make_splits(
+        manifest, 2, seed=1, stratification=big
+    )

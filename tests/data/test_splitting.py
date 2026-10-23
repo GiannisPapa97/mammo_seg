@@ -5,13 +5,16 @@ from mammo_seg.data.splitting import Patient, hold_out, stratified_folds
 
 def make_patients(with_mass: int, without_mass: int) -> list[Patient]:
     return [
-        Patient(patient_id=f"p{index:03d}", has_mass=index < with_mass)
+        Patient(
+            patient_id=f"p{index:03d}",
+            stratum="mass" if index < with_mass else "no_mass",
+        )
         for index in range(with_mass + without_mass)
     ]
 
 
 def positive_ids(patients: list[Patient]) -> set[str]:
-    return {patient.patient_id for patient in patients if patient.has_mass}
+    return {patient.patient_id for patient in patients if patient.stratum == "mass"}
 
 
 # --- folds ---
@@ -35,6 +38,27 @@ def test_folds_keep_the_share_of_patients_with_a_mass() -> None:
     assert {len(fold) for fold in folds} <= {21, 22}
     assert all(len(positive & set(fold)) == 10 for fold in folds)
     assert all(11 <= len(set(fold) - positive) <= 12 for fold in folds)
+
+
+def test_folds_keep_the_share_of_every_stratum() -> None:
+    counts = {
+        "no_mass/fatty": 39,
+        "no_mass/dense": 19,
+        "mass/large": 25,
+        "mass/small": 12,
+    }
+    patients = [
+        Patient(f"{stratum}-{index:02d}", stratum)
+        for stratum, count in counts.items()
+        for index in range(count)
+    ]
+    folds = stratified_folds(patients, 5, seed=0)
+    for stratum, count in counts.items():
+        per_fold = [
+            sum(pid.startswith(stratum + "-") for pid in fold) for fold in folds
+        ]
+        assert sum(per_fold) == count
+        assert max(per_fold) - min(per_fold) <= 1, stratum
 
 
 def test_folds_and_the_ids_inside_are_sorted() -> None:
@@ -75,7 +99,7 @@ def test_fewer_than_two_folds_are_rejected(n_folds: int) -> None:
 
 
 def test_a_class_too_small_for_the_folds_is_rejected() -> None:
-    with pytest.raises(ValueError, match="one class has only 3 patient"):
+    with pytest.raises(ValueError, match="stratum 'mass' has only 3 patient"):
         stratified_folds(make_patients(3, 30), 5, seed=0)
 
 
@@ -121,9 +145,9 @@ def test_a_fraction_outside_zero_and_one_is_rejected(fraction: float) -> None:
 
 
 def test_a_class_too_small_for_the_hold_out_is_rejected() -> None:
-    with pytest.raises(ValueError, match="stratified on masses"):
+    with pytest.raises(ValueError, match="stratified on their strata"):
         hold_out(make_patients(1, 30), 0.2, seed=0)
-    with pytest.raises(ValueError, match="stratified on masses"):
+    with pytest.raises(ValueError, match="stratified on their strata"):
         hold_out(make_patients(50, 58), 0.001, seed=0)
 
 
@@ -138,7 +162,7 @@ def test_no_patients_are_rejected() -> None:
 
 
 def test_duplicate_patient_ids_are_rejected() -> None:
-    patients = [*make_patients(5, 5), Patient("p000", has_mass=True)]
+    patients = [*make_patients(5, 5), Patient("p000", stratum="mass")]
     with pytest.raises(ValueError, match="duplicate patient ids: \\['p000'\\]"):
         stratified_folds(patients, 2, seed=0)
     with pytest.raises(ValueError, match="duplicate patient ids"):
