@@ -48,7 +48,12 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from mammo_seg.data.augmentation import Augmentation, AugmentationSettings
-from mammo_seg.data.dataset import DEFAULT_CANVAS, MammogramDataset, Sample
+from mammo_seg.data.dataset import (
+    DEFAULT_CANVAS,
+    DEFAULT_MULTIPLE,
+    MammogramDataset,
+    Sample,
+)
 from mammo_seg.data.folds import fold_ids
 from mammo_seg.data.loaders import evaluation_loader, training_loader
 from mammo_seg.data.preprocessing import PreprocessingSettings
@@ -500,6 +505,21 @@ def fit(
     )
 
 
+def _training_canvas(
+    augmentation: AugmentationSettings, canvas: tuple[int, int]
+) -> tuple[int, int]:
+    """The canvas of the training samples: that of the images, or, when they are
+    cropped, the crop size rounded up to what the network needs, so a batch of
+    crops costs what its pixels cost. Validation keeps the whole-image canvas."""
+    if augmentation.crop_size is None:
+        return canvas
+    rows, cols = (
+        -(-side // DEFAULT_MULTIPLE) * DEFAULT_MULTIPLE
+        for side in augmentation.crop_size
+    )
+    return rows, cols
+
+
 def train_fold(
     manifest: Manifest,
     splits_file: SplitsFile,
@@ -528,7 +548,7 @@ def train_fold(
         preprocessed_dir,
         ids.train,
         preprocessing_settings,
-        canvas,
+        _training_canvas(augmentation_settings, canvas),
         transform=Augmentation(augmentation_settings),
     )
     validation_data = MammogramDataset(
@@ -564,7 +584,10 @@ def train_fold(
         output_dir,
         model_settings=model_settings,
         preprocessing_settings=preprocessing_settings,
-        metadata={"fold": fold},
+        metadata={
+            "fold": fold,
+            "augmentation": json.dumps(asdict(augmentation_settings)),
+        },
         resume=resume,
         time_limit_minutes=time_limit_minutes,
     )

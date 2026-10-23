@@ -32,7 +32,7 @@ def test_the_defaults_are_mild() -> None:
     assert (settings.rotation, settings.scale, settings.shift) == (10.0, 0.1, 0.1)
     assert (settings.brightness, settings.contrast, settings.gamma) == (0.1, 0.1, 0.2)
     assert settings.noise == 0.01
-    assert settings.crop_size is None
+    assert settings.crop_size is None and settings.crop_mass_fraction == 0.5
 
 
 def test_shapes_and_types_are_kept() -> None:
@@ -130,6 +130,57 @@ def test_a_random_crop_returns_a_patch_of_image_and_mask() -> None:
         assert torch.equal(image > 0.6, mask > 0.5)
 
 
+def crops(fraction: float, seeds: int = 40) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    settings = AugmentationSettings(
+        rotation=0, scale=0, shift=0, brightness=0, contrast=0, gamma=0, noise=0,
+        crop_size=(16, 16), crop_mass_fraction=fraction,
+    )  # fmt: skip
+    found = []
+    for seed in range(seeds):
+        torch.manual_seed(seed)
+        found.append(Augmentation(settings)(*lesion_sample()))
+    return found
+
+
+def test_crops_around_a_mass_always_contain_part_of_it() -> None:
+    patches = crops(1.0)
+    assert all(mask.sum() > 0 for _, mask in patches)
+    assert all(image.shape == mask.shape == (1, 16, 16) for image, mask in patches)
+    # The mass is not always at the same place of the patch.
+    assert len({tuple(torch.nonzero(mask[0])[0].tolist()) for _, mask in patches}) > 3
+
+
+def test_crops_at_random_often_miss_a_small_mass() -> None:
+    patches = crops(0.0)
+    misses = sum(1 for _, mask in patches if mask.sum() == 0)
+    assert 0 < misses < len(patches)  # random, not always off and not always on
+
+
+def test_the_share_of_crops_around_a_mass_follows_the_setting() -> None:
+    # The 16 x 16 mass sits in a 64 x 48 image: a random 16 x 16 patch holds part of
+    # it far less often than half of the time, a mass-centred one half of the time
+    # or more.
+    share = sum(1 for _, mask in crops(0.5, 200) if mask.sum() > 0) / 200
+    assert 0.5 <= share <= 0.8
+
+
+def test_a_crop_of_an_image_without_a_mass_is_placed_at_random() -> None:
+    image, mask = torch.rand(1, 64, 48), torch.zeros(1, 64, 48)
+    settings = AugmentationSettings(
+        rotation=0, scale=0, shift=0, brightness=0, contrast=0, gamma=0, noise=0,
+        crop_size=(16, 16), crop_mass_fraction=1.0,
+    )  # fmt: skip
+    torch.manual_seed(0)
+    patch, patch_mask = Augmentation(settings)(image, mask)
+    assert patch.shape == patch_mask.shape == (1, 16, 16) and patch_mask.sum() == 0
+
+
+def test_crops_are_repeatable_with_the_same_seed() -> None:
+    first, second = crops(0.5, 5), crops(0.5, 5)
+    for (a, b), (c, d) in zip(first, second, strict=True):
+        assert torch.equal(a, c) and torch.equal(b, d)
+
+
 def test_a_crop_larger_than_the_image_is_padded() -> None:
     crop = AugmentationSettings(crop_size=(80, 60))
     torch.manual_seed(0)
@@ -148,6 +199,8 @@ def test_a_crop_larger_than_the_image_is_padded() -> None:
         {"gamma": -0.1},
         {"noise": -0.01},
         {"crop_size": (0, 10)},
+        {"crop_mass_fraction": -0.1},
+        {"crop_mass_fraction": 1.1},
     ],
 )
 def test_invalid_settings_are_rejected(changes: dict[str, object]) -> None:

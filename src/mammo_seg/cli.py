@@ -106,6 +106,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="share of training images with a mass in an epoch",
     )
     training.add_argument(
+        "--crop-size",
+        type=int,
+        default=None,
+        help="train on square crops of this many pixels instead of whole images "
+        "(validation still uses whole images)",
+    )
+    training.add_argument(
+        "--crop-mass-fraction",
+        type=float,
+        default=0.5,
+        help="with --crop-size: share of the crops of an image with a mass that "
+        "contain part of it",
+    )
+    training.add_argument(
         "--samples-per-epoch",
         type=int,
         default=None,
@@ -162,6 +176,7 @@ def _training_log() -> Iterator[None]:
 
 def _train(args: argparse.Namespace) -> int:
     try:
+        from mammo_seg.data.augmentation import AugmentationSettings
         from mammo_seg.data.dataset import canvas_of
         from mammo_seg.device import resolve_device
         from mammo_seg.engine.model import ModelSettings
@@ -192,6 +207,12 @@ def _train(args: argparse.Namespace) -> int:
             encoder=args.encoder,
             encoder_weights=None if args.encoder_weights == "none" else "imagenet",
         )
+        augmentation = AugmentationSettings(
+            crop_size=(args.crop_size, args.crop_size)
+            if args.crop_size is not None
+            else None,
+            crop_mass_fraction=args.crop_mass_fraction,
+        )
         # The images are read with the settings they were preprocessed with.
         record = read_record(args.preprocessed_dir / RECORD_FILE)
         with _training_log():
@@ -203,6 +224,7 @@ def _train(args: argparse.Namespace) -> int:
                 settings,
                 model_settings,
                 record.settings,
+                augmentation,
                 device=resolve_device(args.device),
                 output_dir=output,
                 canvas=canvas_of(record),
