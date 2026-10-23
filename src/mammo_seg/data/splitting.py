@@ -6,8 +6,9 @@ CC and MLO, both breasts, a second exam) leak between training and evaluation.
 The functions here work on a list of patients and return groups of patient ids.
 Mapping images to groups through their ``patient_id`` is done in ``splits.py``.
 
-Both functions stratify on ``has_mass``: each group keeps about the same share of
-patients with a mass as the whole set, and group sizes are as equal as possible.
+Both functions stratify on the patient's ``stratum``, a label such as
+``mass/small/dense`` (see ``strata.py``): each returned group keeps about the same
+share of every stratum as the whole set, and group sizes are as equal as possible.
 For a valid input they guarantee that
 
 - every patient id is in exactly one returned group
@@ -18,7 +19,7 @@ For a valid input they guarantee that
 
 and they raise ``ValueError`` for an invalid input: no patients, duplicate patient
 ids, a fraction outside (0, 1), fewer than 2 folds, or too few patients of one
-class to fill the groups.
+stratum to fill the groups.
 """
 
 from collections import Counter
@@ -34,7 +35,7 @@ class Patient:
     """What the splitting needs to know about a patient."""
 
     patient_id: str
-    has_mass: bool  # at least one image of the patient has a mass
+    stratum: str  # the label to stratify on, for example "mass/small/dense"
 
 
 def hold_out(
@@ -52,7 +53,7 @@ def hold_out(
     except ValueError as error:
         raise ValueError(
             f"cannot hold out {fraction:.0%} of {len(ids)} patients "
-            f"stratified on masses: {error}"
+            f"stratified on their strata: {error}"
         ) from error
     return _sorted(train), _sorted(test)
 
@@ -65,11 +66,13 @@ def stratified_folds(
     if n_folds < 2:
         raise ValueError(f"at least 2 folds are needed, got {n_folds}")
     ids, labels = _arrays(patients)
-    smallest = min(Counter(labels.tolist()).values())
+    stratum, smallest = min(
+        Counter(labels.tolist()).items(), key=lambda item: (item[1], item[0])
+    )
     if smallest < n_folds:
         raise ValueError(
-            f"cannot make {n_folds} folds: one class has only {smallest} "
-            f"patient(s) and every fold needs at least one of each class"
+            f"cannot make {n_folds} folds: the stratum {stratum!r} has only "
+            f"{smallest} patient(s) and every fold needs at least one of each stratum"
         )
     splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     return tuple(
@@ -90,7 +93,7 @@ def _arrays(patients: Sequence[Patient]) -> tuple[np.ndarray, np.ndarray]:
     # Sorted by id, so the result does not depend on the order of the input.
     ordered = sorted(patients, key=lambda patient: patient.patient_id)
     ids = np.array([patient.patient_id for patient in ordered])
-    labels = np.array([patient.has_mass for patient in ordered])
+    labels = np.array([patient.stratum for patient in ordered])
     return ids, labels
 
 

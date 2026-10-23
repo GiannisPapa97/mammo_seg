@@ -2,15 +2,20 @@
 
 All images of a patient go to the same set, so near-identical views of the same
 lesion never leak between training and evaluation. Patients are stratified on
-whether they have at least one image with a mass (see ``splitting.py``).
+their stratum (see ``strata.py``): with or without a mass, a small mass or not,
+dense breasts or not, so the test set and every fold get a similar mix of cases.
+A stratum too small to reach every set is merged with its neighbours first, once
+for the test set (it needs a patient for the test set and every fold) and once for
+the folds.
 
 Images with an excluded view are left out of the splits (see ``EXCLUDED_VIEWS``).
 All other images are kept, including every image without a mass: the normal ones
 and those with only calcifications or other lesions.
 
-The splits are stored as JSON together with the seed, the arguments and a
-fingerprint of the manifest they were made from, so a later step can refuse
-splits that do not belong to its manifest.
+The splits are stored as JSON together with the seed, the arguments, the
+stratification settings, the stratum of every patient and a fingerprint of the
+manifest they were made from, so a later step can refuse splits that do not belong
+to its manifest.
 
 Run it with ``python -m mammo_seg.data.splits --folds 5 [--test-fraction 0.2]``.
 """
@@ -30,11 +35,18 @@ from pydantic.dataclasses import dataclass
 from mammo_seg.data.manifest import read_manifest
 from mammo_seg.data.schema import ImageRecord, Manifest, View, image_to_json
 from mammo_seg.data.splitting import Patient, hold_out, stratified_folds
+from mammo_seg.data.strata import (
+    Group,
+    Stratification,
+    group_name,
+    merge_small_groups,
+    patient_profiles,
+)
 
 DEFAULT_MANIFEST = Path("data/processed/manifest.json")
 DEFAULT_OUTPUT = Path("data/processed/splits.json")
 DEFAULT_SEED = 0
-SPLITS_VERSION: Final = 1
+SPLITS_VERSION: Final = 2  # 2: stratified on strata, which are stored
 _CONFIG = ConfigDict(strict=True, extra="forbid")
 
 # The one FB image (a reversed CC) has no mass annotation although its breast has a
@@ -88,14 +100,20 @@ def select_images(manifest: Manifest) -> tuple[ImageRecord, ...]:
     return tuple(image for image in manifest.images if image.view not in EXCLUDED_VIEWS)
 
 
-def patients_of(images: Sequence[ImageRecord]) -> list[Patient]:
-    """One patient per ``patient_id``; has a mass if any of the images has one."""
-    has_mass: dict[str, bool] = {}
-    for image in images:
-        has_mass[image.patient_id] = has_mass.get(image.patient_id, False) or (
-            image.has_mass
-        )
-    return [Patient(patient_id, flag) for patient_id, flag in sorted(has_mass.items())]
+def patient_groups(
+    images: Sequence[ImageRecord],
+    stratification: Stratification = Stratification(),  # noqa: B008
+) -> dict[str, Group]:
+    """The stratum of every patient of ``images``, before any merging."""
+    return {
+        profile.patient_id: profile.group
+        for profile in patient_profiles(images, stratification)
+    }
+
+
+def _patients(groups: dict[str, Group], min_size: int) -> list[Patient]:
+    merged = merge_small_groups(groups, min_size)
+    return [Patient(patient_id, merged[patient_id]) for patient_id in sorted(merged)]
 
 
 def make_splits(
@@ -103,26 +121,31 @@ def make_splits(
     n_folds: int,
     test_fraction: float | None = None,
     seed: int = DEFAULT_SEED,
+    stratification: Stratification = Stratification(),  # noqa: B008
 ) -> Splits:
     """Split the patients of the manifest into K folds, with an optional test set.
 
     With ``test_fraction`` set, that share of the patients is held out first, then
-    the rest is split into folds; without it, all patients go into the folds.
-    Raises ValueError for invalid arguments or classes too small to stratify.
+    the rest is split into folds; without it, all patients go into the folds. Both
+    steps are stratified on the patients' strata, merged where a stratum has too
+    few patients for the sets. Raises ValueError for invalid arguments or strata
+    too small to stratify even after merging.
     """
+    if n_folds < 2:
+        raise ValueError(f"at least 2 folds are needed, got {n_folds}")
     images = select_images(manifest)
     excluded = tuple(
         sorted(
             image.file_id for image in manifest.images if image.view in EXCLUDED_VIEWS
         )
     )
-    patients = patients_of(images)
+    groups = patient_groups(images, stratification)
     test: tuple[str, ...] = ()
     if test_fraction is not None:
-        train, test = hold_out(patients, test_fraction, seed)
-        kept = set(train)
-        patients = [patient for patient in patients if patient.patient_id in kept]
-    folds = stratified_folds(patients, n_folds, seed)
+        # The test set and every fold need a patient of each stratum.
+        train, test = hold_out(_patients(groups, n_folds + 1), test_fraction, seed)
+        groups = {patient_id: groups[patient_id] for patient_id in train}
+    folds = stratified_folds(_patients(groups, n_folds), n_folds, seed)
     return Splits(test_patients=test, folds=folds, excluded_images=excluded)
 
 
@@ -173,11 +196,15 @@ def split_summary(frame: pd.DataFrame) -> pd.DataFrame:
 class SplitsFile:
     """The content of ``splits.json``: the splits and how they were made."""
 
-    version: Literal[1]
+    version: Literal[2]
     manifest_fingerprint: str  # see manifest_fingerprint()
     seed: int
     n_folds: int
     test_fraction: float | None
+    stratification: Stratification
+    # The stratum of every patient of the splits, before merging, such as
+    # "mass/small/dense".
+    strata: dict[str, str]
     splits: Splits
 
     @model_validator(mode="after")
@@ -193,6 +220,8 @@ class SplitsFile:
             )
         if (self.test_fraction is None) != (not self.splits.test_patients):
             raise ValueError("there is a test set exactly when a test fraction is set")
+        if set(self.strata) != set(self.splits.split_of_patient()):
+            raise ValueError("the strata must name exactly the patients of the splits")
         return self
 
 
@@ -213,16 +242,32 @@ def create_splits_file(
     n_folds: int,
     test_fraction: float | None = None,
     seed: int = DEFAULT_SEED,
+    stratification: Stratification = Stratification(),  # noqa: B008
 ) -> SplitsFile:
     """Make the splits of a manifest and record how they were made."""
+    groups = patient_groups(select_images(manifest), stratification)
     return SplitsFile(
         version=SPLITS_VERSION,
         manifest_fingerprint=manifest_fingerprint(manifest),
         seed=seed,
         n_folds=n_folds,
         test_fraction=test_fraction,
-        splits=make_splits(manifest, n_folds, test_fraction, seed),
+        stratification=stratification,
+        strata={patient_id: group_name(group) for patient_id, group in groups.items()},
+        splits=make_splits(manifest, n_folds, test_fraction, seed, stratification),
     )
+
+
+def strata_summary(splits_file: SplitsFile) -> pd.DataFrame:
+    """Patients of every stratum (columns) in every set (rows), with totals."""
+    set_of_patient = splits_file.splits.split_of_patient()
+    frame = pd.DataFrame(
+        {
+            "split": [set_of_patient[patient] for patient in splits_file.strata],
+            "stratum": list(splits_file.strata.values()),
+        }
+    )
+    return pd.crosstab(frame.split, frame.stratum, margins=True, margins_name="total")
 
 
 def check_manifest(splits_file: SplitsFile, manifest: Manifest) -> Splits:
@@ -273,6 +318,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary = split_summary(splits_frame(manifest, splits_file.splits))
     print(f"Wrote {args.output}")
     print(summary.to_string())
+    print("\nPatients per stratum:")
+    print(strata_summary(splits_file).to_string())
     return 0
 
 

@@ -1,14 +1,31 @@
 """Helpers that build small synthetic manifests directly, without raw files."""
 
-from mammo_seg.data.schema import ImageRecord, LesionType, Manifest, Roi, View
+import math
+
+from mammo_seg.data.schema import ImageRecord, LesionType, Manifest, Point, Roi, View
+from mammo_seg.data.strata import INBREAST_PIXEL_SIZE_MM
 
 SQUARE = ((0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0))
 
 
+def square_of(mm2: float) -> tuple[Point, ...]:
+    """A square polygon of ``mm2`` square millimetres at the INbreast pixel size."""
+    side = math.sqrt(mm2) / INBREAST_PIXEL_SIZE_MM
+    return ((0.0, 0.0), (side, 0.0), (side, side), (0.0, side))
+
+
 def make_image(
-    file_id: int, patient: int, *, view: View = View.CC, masses: int = 0
+    file_id: int,
+    patient: int,
+    *,
+    view: View = View.CC,
+    masses: int = 0,
+    acr: int | None = 2,
+    mass_mm2: float | None = None,
 ) -> ImageRecord:
-    rois = tuple(Roi(LesionType.MASS, SQUARE) for _ in range(masses))
+    """``masses`` masses of ``mass_mm2`` each, or of the 12-pixel ``SQUARE``."""
+    outline = SQUARE if mass_mm2 is None else square_of(mass_mm2)
+    rois = tuple(Roi(LesionType.MASS, outline) for _ in range(masses))
     return ImageRecord(
         file_id=f"{file_id:08d}",
         patient_id=f"{patient:016x}",
@@ -18,7 +35,7 @@ def make_image(
         rows=10,
         cols=10,
         acquisition_date="200902",
-        acr=2,
+        acr=acr,
         birads="2",
         has_annotation=bool(rois),
         rois=rois,

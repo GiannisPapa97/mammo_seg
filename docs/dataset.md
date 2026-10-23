@@ -122,8 +122,8 @@ Patients (108):
 2. **Very small training set.** 107 positive images from 50 patients. Use cross-validation grouped by patient, report variability across folds, and expect noisy metrics. A pretrained encoder and strong augmentation are likely needed.
 3. **Splitting.**
    - Group by patient id, never by image or breast: both views of a mass, both breasts, and the second exam of 9 patients would otherwise leak.
-   - Stratify at patient level on "has any mass image" (50 positive, 58 negative patients). With 5 folds that is about 10 positive patients and 21 positive images per fold. How the splits are made is in [data-pipeline.md](data-pipeline.md#2-patient-splits).
-   - Optional extra balance: image size and BI-RADS.
+   - Stratify at patient level on "has any mass image" (50 positive, 58 negative patients), and also on mass size (any mass under 100 mm²) and breast density (any image ACR 3 or 4): stratifying on masses alone gave folds and a test set with very different mass sizes and densities. With 5 folds that is about 10 positive patients and 21 positive images per fold. How the splits are made is in [data-pipeline.md](data-pipeline.md#2-patient-splits).
+   - Left to chance: image size, view and the normal (BI-RADS 1) images.
    - There is no official split. A fixed held-out test set of about 20% of patients would hold only about 10 positive patients, so metrics from it are very noisy. Report cross-validation results and use a test set only as a sanity check.
 4. **Negatives matter.** Of the 410 images, 303 have no mass. Decide whether to train on positives only or on all images, and report lesion-positive and all-image metrics separately. Also report the 67 normal and the 236 other-lesion negatives separately, since they behave differently.
 5. **Masks must be derived.** Rasterize the polygons (clip to the image, merge multiple masses per image) and validate them. Keep the derived masks under `data/processed/`.
