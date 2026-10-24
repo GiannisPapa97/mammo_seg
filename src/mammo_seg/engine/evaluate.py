@@ -11,6 +11,14 @@ the metrics of ``metrics.py`` under a grid of post-processing settings:
   covers 0.13 to 0.28 mm depending on the size of the breast; its area comes from
   the preprocessing record (``pixel_area_mm2``).
 
+Besides the per-image metrics, every setting is scored per lesion: the masses are
+the connected regions of the mask, and a mass is **found** when a predicted region
+overlaps it with an IoU of at least ``HIT_IOU`` (0.1). A predicted region that
+finds no mass is a **false region**. So a region that spills far over a mass counts
+as a miss and a false region, and the found masses against the false regions per
+image, over the thresholds, make a curve like an FROC. Two masses that touch are one
+region of the mask and count as one mass (in INbreast, 116 masses give 115 regions).
+
 Scoring a validation fold with the model that did not train on it, for every fold,
 gives out-of-fold predictions for all development images; the results of the folds
 are pooled by concatenating the per-image scores. Choosing a setting on these
@@ -28,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import torch
 from scipy import ndimage
 from torch import nn
@@ -53,6 +62,8 @@ DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
 # The smallest INbreast mass is 14.7 mm², so these never remove a whole mass.
 DEFAULT_MIN_AREAS_MM2 = (0.0, 2.0, 5.0, 10.0)
 _EIGHT_CONNECTED = np.ones((3, 3), dtype=int)
+# A mass is found when a predicted region overlaps it with at least this IoU.
+HIT_IOU = 0.1
 
 
 @dataclass(frozen=True)
@@ -122,9 +133,46 @@ def remove_small_regions(prediction: torch.Tensor, min_area: int) -> torch.Tenso
 
 
 @dataclass(frozen=True)
+class MassResult:
+    """One mass of an image: its area and whether a predicted region found it."""
+
+    area_mm2: float
+    found: bool
+
+
+def match_lesions(
+    predicted: npt.NDArray[np.bool_],
+    truth: npt.NDArray[np.bool_],
+    pixel_area_mm2: float,
+) -> tuple[tuple[MassResult, ...], int]:
+    """The masses of a ``[H, W]`` mask, each found or not, and the number of false
+    regions of a ``[H, W]`` prediction (see the module docstring)."""
+    masses, n_masses = ndimage.label(truth, structure=_EIGHT_CONNECTED)
+    regions, n_regions = ndimage.label(predicted, structure=_EIGHT_CONNECTED)
+    mass_sizes = np.bincount(masses.ravel(), minlength=n_masses + 1)[1:]
+    found = np.zeros(n_masses, dtype=bool)
+    true_regions = np.zeros(n_regions, dtype=bool)
+    if n_masses and n_regions:
+        region_sizes = np.bincount(regions.ravel(), minlength=n_regions + 1)[1:]
+        pairs = masses.ravel().astype(np.int64) * (n_regions + 1) + regions.ravel()
+        overlap = np.bincount(pairs, minlength=(n_masses + 1) * (n_regions + 1))
+        overlap = overlap.reshape(n_masses + 1, n_regions + 1)[1:, 1:]
+        union = mass_sizes[:, None] + region_sizes[None, :] - overlap
+        hits = overlap / union >= HIT_IOU
+        found, true_regions = hits.any(axis=1), hits.any(axis=0)
+    results = tuple(
+        MassResult(float(size * pixel_area_mm2), bool(hit))
+        for size, hit in zip(mass_sizes, found, strict=True)
+    )
+    return results, int((~true_regions).sum())
+
+
+@dataclass(frozen=True)
 class ImageResult:
     scores: ImageScores
     predicted_pixels: int  # on the valid pixels, after post-processing
+    masses: tuple[MassResult, ...]
+    false_regions: int  # predicted regions that found no mass
 
 
 def score_batch(
@@ -156,10 +204,16 @@ def score_batch(
     ).unsqueeze(1)
     scores = image_scores(cleaned.float(), masks, valid)
     pixels = cleaned.flatten(1).sum(1).tolist()
-    return [
-        ImageResult(score, int(count))
-        for score, count in zip(scores, pixels, strict=True)
-    ]
+    truth = (masks > 0.5) & valid
+    results = []
+    for index, (score, count, info) in enumerate(
+        zip(scores, pixels, infos, strict=True)
+    ):
+        masses, false_regions = match_lesions(
+            cleaned[index, 0].numpy(), truth[index, 0].numpy(), info.pixel_area_mm2
+        )
+        results.append(ImageResult(score, int(count), masses, false_regions))
+    return results
 
 
 @dataclass(frozen=True)
@@ -173,6 +227,11 @@ class SettingResult:
     # The mean of the Dice on images with a mass and on images without one, so both
     # kinds count equally; NaN if either kind is missing.
     balanced_dice: float
+    masses: int  # in all the images
+    # The share of the masses that were found; NaN without masses.
+    found_masses: float
+    # The mean number of false regions per image, over all images; NaN without any.
+    false_regions_per_image: float
 
 
 def summarize_results(
@@ -180,14 +239,20 @@ def summarize_results(
 ) -> SettingResult:
     summary = summarize([result.scores for result in results])
     negatives = [r.predicted_pixels for r in results if not r.scores.has_mass]
+    masses = [mass for result in results for mass in result.masses]
     return SettingResult(
         setting=setting,
         summary=summary,
-        false_positive_pixels=sum(negatives) / len(negatives)
-        if negatives
-        else math.nan,
+        false_positive_pixels=_mean(negatives),
         balanced_dice=(summary.with_mass.dice + summary.without_mass.dice) / 2,
+        masses=len(masses),
+        found_masses=_mean([float(mass.found) for mass in masses]),
+        false_regions_per_image=_mean([r.false_regions for r in results]),
     )
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else math.nan
 
 
 @dataclass(frozen=True)
@@ -358,7 +423,8 @@ def _show(value: float, digits: int = 3) -> str:
 
 _HEADER = (
     f"{'threshold':>9} {'min mm²':>8}  | {'mass Dice':>9} {'sens.':>6} {'prec.':>6} | "
-    f"{'false alarms':>12} {'FP pixels':>9} | {'all Dice':>8} {'balanced':>8}"
+    f"{'false alarms':>12} {'FP pixels':>9} | {'found':>6} {'FP/image':>8} | "
+    f"{'all Dice':>8} {'balanced':>8}"
 )
 
 
@@ -370,6 +436,8 @@ def _row(label: str, result: SettingResult) -> str:
         f"{_show(groups.with_mass.precision):>6} | "
         f"{_show(groups.without_mass.false_alarm_rate):>12} "
         f"{_show(result.false_positive_pixels, 0):>9} | "
+        f"{_show(result.found_masses):>6} "
+        f"{_show(result.false_regions_per_image, 2):>8} | "
         f"{_show(groups.all_images.dice):>8} {_show(result.balanced_dice):>8}"
     )
 

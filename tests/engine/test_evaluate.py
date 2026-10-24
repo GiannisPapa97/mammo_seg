@@ -2,6 +2,7 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 from tests.data.manifests import make_manifest
@@ -34,6 +35,7 @@ from mammo_seg.engine.evaluate import (
     evaluation_to_dict,
     format_evaluation,
     image_infos,
+    match_lesions,
     pixel_area_mm2,
     remove_small_regions,
     score_batch,
@@ -125,6 +127,59 @@ def test_an_empty_prediction_stays_empty() -> None:
     assert not remove_small_regions(empty, 10).any()
 
 
+# --- lesions ---
+
+
+def square(rows: slice, cols: slice, size: int = 20) -> np.ndarray:
+    image = np.zeros((size, size), dtype=bool)
+    image[rows, cols] = True
+    return image
+
+
+MASS = square(slice(2, 6), slice(2, 6))  # 16 pixels
+
+
+def test_a_mass_is_found_by_a_region_that_overlaps_it_enough() -> None:
+    half = square(slice(2, 4), slice(2, 6))  # 8 of its pixels: IoU 0.5
+    masses, false_regions = match_lesions(half, MASS, 1.0)
+    assert [mass.found for mass in masses] == [True] and false_regions == 0
+
+
+def test_a_region_far_larger_than_the_mass_misses_it_and_is_false() -> None:
+    everything = np.ones((20, 20), dtype=bool)  # IoU 16 / 400 = 0.04
+    masses, false_regions = match_lesions(everything, MASS, 1.0)
+    assert [mass.found for mass in masses] == [False] and false_regions == 1
+
+
+def test_a_region_away_from_every_mass_is_a_false_region() -> None:
+    elsewhere = square(slice(15, 17), slice(15, 17))
+    masses, false_regions = match_lesions(MASS | elsewhere, MASS, 1.0)
+    assert [mass.found for mass in masses] == [True] and false_regions == 1
+
+
+def test_one_region_can_find_two_masses() -> None:
+    two = MASS | square(slice(2, 6), slice(8, 12))
+    across = square(slice(2, 6), slice(2, 12))  # 40 pixels: IoU 0.4 with each
+    masses, false_regions = match_lesions(across, two, 1.0)
+    assert [mass.found for mass in masses] == [True, True] and false_regions == 0
+
+
+def test_two_regions_on_one_mass_are_both_true() -> None:
+    parts = square(slice(2, 4), slice(2, 6)) | square(slice(5, 6), slice(2, 6))
+    masses, false_regions = match_lesions(parts, MASS, 1.0)
+    assert [mass.found for mass in masses] == [True] and false_regions == 0
+
+
+def test_the_area_of_a_mass_is_in_mm2() -> None:
+    (mass,), _ = match_lesions(np.zeros((20, 20), dtype=bool), MASS, 0.5)
+    assert mass.area_mm2 == 8.0 and not mass.found
+
+
+def test_without_masses_and_regions_there_is_nothing_to_count() -> None:
+    empty = np.zeros((20, 20), dtype=bool)
+    assert match_lesions(empty, empty, 1.0) == ((), 0)
+
+
 # --- scoring a batch ---
 
 
@@ -195,6 +250,18 @@ def test_each_image_of_a_batch_is_scored_on_its_own() -> None:
     assert [r.predicted_pixels for r in results] == [8, 0]
 
 
+def test_a_batch_is_scored_per_lesion_on_the_valid_pixels() -> None:
+    # The 8 predicted mass pixels find the mass; the 2 pixel spot is a false region;
+    # the confident invalid column is not a region at all.
+    (kept,) = score_batch(*batch(True), PostProcessing(0.5, 0), [ONE_MM2])
+    assert [mass.found for mass in kept.masses] == [True]
+    assert kept.masses[0].area_mm2 == 16.0 and kept.false_regions == 1
+    (cleaned,) = score_batch(*batch(True), PostProcessing(0.5, 5), [ONE_MM2])
+    assert cleaned.false_regions == 0
+    (nothing,) = score_batch(*batch(False), PostProcessing(0.5, 0), [ONE_MM2])
+    assert nothing.masses == () and nothing.false_regions == 1
+
+
 def test_the_same_area_in_mm2_removes_more_pixels_on_a_finer_image() -> None:
     # The 2 pixel spot is 2 mm² at 1 mm² per pixel, but 8 mm² at 4 mm² per pixel.
     coarse = score_batch(*batch(False), PostProcessing(0.5, 5), [ImageInfo(4.0)])[0]
@@ -225,6 +292,8 @@ def test_the_summary_of_results() -> None:
     assert result.summary.without_mass.dice == pytest.approx(0.5)
     expected = (2 * 8 / (2 * 8 + 2 + 8) + 0.5) / 2
     assert result.balanced_dice == pytest.approx(expected)
+    assert result.masses == 1 and result.found_masses == 1.0
+    assert result.false_regions_per_image == pytest.approx(2 / 3)  # 1, 1 and 0
 
 
 def test_without_images_of_one_kind_the_balanced_dice_is_undefined() -> None:
@@ -233,6 +302,9 @@ def test_without_images_of_one_kind_the_balanced_dice_is_undefined() -> None:
     )
     assert math.isnan(only_masses.balanced_dice)
     assert math.isnan(only_masses.false_positive_pixels)
+    nothing = summarize_results(PostProcessing(), [])
+    assert nothing.masses == 0 and math.isnan(nothing.found_masses)
+    assert math.isnan(nothing.false_regions_per_image)
 
 
 # --- a model over a loader ---
@@ -277,7 +349,13 @@ def test_a_model_is_scored_under_every_setting_and_against_predicting_nothing(
     assert cleaned.summary.with_mass.dice == 1.0
     assert cleaned.summary.without_mass.false_alarm_rate == 0.0
     assert cleaned.balanced_dice == 1.0
+    # Per lesion: the strip is a false region on every image until it is removed.
+    assert strip.masses == cleaned.masses == strip.summary.with_mass.images == 2
+    assert strip.found_masses == cleaned.found_masses == 1.0
+    assert strip.false_regions_per_image == 1.0
+    assert cleaned.false_regions_per_image == 0.0
     nothing = summarize_results(PostProcessing(), results.baseline)
+    assert nothing.found_masses == 0.0 and nothing.false_regions_per_image == 0.0
     assert nothing.summary.with_mass.dice == 0
     assert nothing.summary.without_mass.dice == 1
     assert nothing.false_positive_pixels == 0
@@ -426,7 +504,9 @@ def test_the_test_set_is_scored_instead_of_the_validation_folds(
 def sweep() -> FoldEvaluation:
     def result(threshold: float, dice: float, other: float) -> SettingResult:
         base = summarize_results(PostProcessing(threshold), [])
-        return SettingResult(base.setting, base.summary, 0.0, dice + other)
+        return SettingResult(
+            base.setting, base.summary, 0.0, dice + other, 0, math.nan, math.nan
+        )
 
     return FoldEvaluation(
         images=0,
@@ -461,6 +541,8 @@ def test_the_results_become_json_with_none_for_undefined_values(
     pooled = content["pooled"]["settings"][0]
     assert pooled["setting"] == {"threshold": 0.5, "min_area_mm2": 0}
     assert content["pooled"]["baseline"]["summary"]["with_mass"]["sensitivity"] == 0.0
+    assert content["pooled"]["baseline"]["found_masses"] == 0.0
+    assert pooled["masses"] == 4
 
 
 def test_the_text_shows_the_sweep_the_baseline_and_the_folds(
