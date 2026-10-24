@@ -158,3 +158,17 @@ def test_the_comparison_writes_its_evaluations_into_the_working_folder() -> None
     assert "--output {output}" in evaluate and "--runs-dir {runs}" in evaluate
     code = "".join("".join(c["source"]) for c in read(COMPARISON)["cells"])
     assert 'RUNS = WORK / "runs"' in code  # WORK is /kaggle/working
+
+
+@pytest.mark.parametrize(
+    ("notebook", "folder"),
+    [(KAGGLE, "RUNS"), (EVALUATION, "WORK"), (COMPARISON, "RUNS")],
+    ids=lambda value: value.name if isinstance(value, Path) else value,
+)
+def test_a_kaggle_notebook_records_the_commit_of_its_code(
+    notebook: Path, folder: str
+) -> None:
+    recorded = [c for c in commands(notebook) if "rev-parse HEAD" in c]
+    assert len(recorded) == 1 and "tee -a {VERSION}" in recorded[0]
+    code = "".join("".join(c["source"]) for c in read(notebook)["cells"])
+    assert f'VERSION = {folder} / "code_version.txt"' in code
