@@ -13,6 +13,7 @@ from mammo_seg import cli
 NOTEBOOKS = sorted(Path("notebooks").glob("*.ipynb"))
 KAGGLE = Path("notebooks/05_kaggle_training.ipynb")
 EVALUATION = Path("notebooks/06_kaggle_evaluation.ipynb")
+COMPARISON = Path("notebooks/08_kaggle_whole_vs_patches.ipynb")
 DATA_STEPS = {"manifest", "splits", "masks", "preprocess"}
 
 
@@ -64,7 +65,11 @@ def test_a_notebook_is_valid_and_has_no_outputs(notebook: Path) -> None:
 
 @pytest.mark.parametrize(
     ("notebook", "steps"),
-    [(KAGGLE, DATA_STEPS | {"train"}), (EVALUATION, DATA_STEPS | {"evaluate"})],
+    [
+        (KAGGLE, DATA_STEPS | {"train"}),
+        (EVALUATION, DATA_STEPS | {"evaluate"}),
+        (COMPARISON, DATA_STEPS | {"train", "evaluate"}),
+    ],
     ids=lambda value: value.name if isinstance(value, Path) else "",
 )
 def test_the_kaggle_notebooks_use_options_that_exist(
@@ -115,9 +120,41 @@ def test_the_options_of_the_notebook_cannot_override_the_fold_or_the_time() -> N
     assert train.index("{TRAIN_OPTIONS}") < train.index("--max-minutes {minutes}")
 
 
-@pytest.mark.parametrize("notebook", [KAGGLE, EVALUATION], ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "notebook", [KAGGLE, EVALUATION, COMPARISON], ids=lambda p: p.name
+)
 def test_the_repository_is_not_cloned_where_it_would_hide_the_package(
     notebook: Path,
 ) -> None:
     source = notebook.read_text()
     assert 'WORK / "mammo_seg"' not in source and "/mammo_seg " not in source
+
+
+def test_the_comparison_settings_are_valid() -> None:
+    settings = settings_of(COMPARISON, "FOLDS", "EPOCHS", "EXPERIMENTS")
+    assert settings["FOLDS"] == [0, 1, 2, 3, 4] and settings["EPOCHS"] >= 1
+    experiments = settings["EXPERIMENTS"]
+    assert set(experiments) == {"whole", "patches"}
+    parsed = {
+        name: cli.build_parser().parse_args(["train", *shlex.split(options)])
+        for name, options in experiments.items()
+    }
+    assert parsed["whole"].crop_size is None and parsed["patches"].crop_size == 512
+    # The inference follows the crops: neither design sets it.
+    assert parsed["whole"].inference is None and parsed["patches"].inference is None
+
+
+def test_the_options_of_a_design_cannot_override_the_fold_or_the_time() -> None:
+    (train,) = [c for c in commands(COMPARISON) if c.startswith("mammo-seg train ")]
+    assert train.index("{options}") < train.index("--fold {fold}")
+    assert train.index("{options}") < train.index("--max-minutes {minutes}")
+    assert train.index("--epochs {EPOCHS}") < train.index("{options}")
+
+
+def test_the_comparison_writes_its_evaluations_into_the_working_folder() -> None:
+    (evaluate,) = [
+        c for c in commands(COMPARISON) if c.startswith("mammo-seg evaluate ")
+    ]
+    assert "--output {output}" in evaluate and "--runs-dir {runs}" in evaluate
+    code = "".join("".join(c["source"]) for c in read(COMPARISON)["cells"])
+    assert 'RUNS = WORK / "runs"' in code  # WORK is /kaggle/working
