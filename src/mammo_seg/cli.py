@@ -31,7 +31,7 @@ DEFAULT_OUTPUT_DIR = Path("runs")
 # The choices and defaults of the engine, spelled out because importing the engine
 # imports PyTorch; the tests check that they are the same.
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
-DEFAULT_MIN_AREAS = (0, 100, 300, 1000)
+DEFAULT_MIN_AREAS_MM2 = (0.0, 2.0, 5.0, 10.0)
 ARCHITECTURES = ("unet", "unetplusplus", "deeplabv3", "deeplabv3plus", "fpn")
 SELECTION_METRICS = tuple(
     f"{group}.{metric}"
@@ -211,11 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--thresholds", type=float, nargs="+", default=list(DEFAULT_THRESHOLDS)
     )
     evaluate.add_argument(
-        "--min-areas",
-        type=int,
+        "--min-areas-mm2",
+        type=float,
         nargs="+",
-        default=list(DEFAULT_MIN_AREAS),
-        help="predicted regions with fewer pixels are removed (0: keep all)",
+        default=list(DEFAULT_MIN_AREAS_MM2),
+        help="predicted regions smaller than this many mm² are removed (0: keep all)",
     )
     evaluate.add_argument("--batch-size", type=int, default=4)
     evaluate.add_argument("--num-workers", type=int, default=0)
@@ -366,7 +366,7 @@ def _evaluate(args: argparse.Namespace) -> int:
             args.preprocessed_dir,
             args.runs_dir,
             args.folds,
-            settings_grid(args.thresholds, args.min_areas),
+            settings_grid(args.thresholds, args.min_areas_mm2),
             record.settings,
             checkpoint_name=args.checkpoint_name,
             test=args.test,

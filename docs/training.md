@@ -158,10 +158,22 @@ On Kaggle, use [notebooks/05_kaggle_training.ipynb](../notebooks/05_kaggle_train
 
 ```bash
 mammo-seg evaluate --runs-dir runs                       # all five folds, a grid of settings
-mammo-seg evaluate --runs-dir runs --folds 0 1 --thresholds 0.4 0.5 --min-areas 0 500
+mammo-seg evaluate --runs-dir runs --folds 0 1 --thresholds 0.4 0.5 --min-areas-mm2 0 5
 ```
 
-Each probability map is turned into a prediction under every combination of a **threshold** (0.3 to 0.7 by default) and a **minimum region size** (0, 100, 300 and 1000 pixels by default): connected regions (8-connectivity) of predicted pixels smaller than the minimum are removed, so a stray spot of a few pixels no longer makes a false alarm. For each setting the table gives the metrics of section 1 on images with a mass, the false-alarm rate with that rule, the mean number of predicted pixels on images without a mass (`FP pixels`), the Dice over all images, and the **balanced Dice**: the mean of the Dice on images with a mass and on images without one, so both kinds count equally. A row for the baseline of **predicting nothing** is always printed, since it scores the share of images without a mass on the all-images Dice. `*` marks the best balanced Dice, and the folds are shown at that setting. Everything is also written to `<runs-dir>/evaluation_validation.json` (or `_test.json`; `--output` changes it).
+Each probability map is turned into a prediction under every combination of a **threshold** (0.3 to 0.7 by default) and a **minimum region size** in mm² (`--min-areas-mm2`; 0, 2, 5 and 10 mm² by default): connected regions (8-connectivity) of predicted pixels smaller than the minimum are removed, so a stray spot of a few pixels no longer makes a false alarm. The size is in mm², not pixels, because a preprocessed pixel covers 0.017 to 0.078 mm² depending on the size of the breast (its area comes from `preprocessing.json` and the native pixel of 0.07 mm): 10 mm² is 129 to 579 pixels. The smallest mass is 14.7 mm², so the defaults never remove a whole mass; the earlier default of 1000 pixels removed 12 of the 115.
+
+For each setting the table gives:
+
+- the metrics of section 1 on images with a mass, the false-alarm rate with that rule, and the mean number of predicted pixels on images without a mass (`FP pixels`);
+- **per lesion**: the share of the masses that were **found** and the **false regions per image** (`FP/image`, over all images). The masses are the connected regions of the mask (two masses that touch count as one: 116 masses give 115 regions). A mass is found when a predicted region overlaps it with an IoU of at least 0.1, and a predicted region that finds no mass is a false region. So a region that spills far over a mass counts as a miss and a false region, which the per-image sensitivity hides. Over the thresholds, the found masses against the false regions per image make a curve like an FROC;
+- the Dice over all images, and the **balanced Dice**: the mean of the Dice on images with a mass and on images without one, so both kinds count equally.
+
+A row for the baseline of **predicting nothing** is always printed, since it scores the share of images without a mass on the all-images Dice. `*` marks the best balanced Dice, and the folds are shown at that setting.
+
+Below, the same setting **by subgroup**, all folds pooled, with the thresholds of the splits: images without a mass by kind (normal, BI-RADS 1; a benign finding, BI-RADS 2 or 3; a suspicious finding that is not a mass, BI-RADS 4a to 6) with their false alarms and false regions per image; masses under 100 mm² and of 100 mm² or more with the share found; and fatty (ACR 1 or 2) and dense (ACR 3 or 4) breasts with the Dice on images with a mass and the false alarms on images without one. Images without a mass are not equally hard, so a set's false alarms depend on its mix; the subgroups make sets with different mixes comparable.
+
+Everything, the subgroups of every setting included, is also written to `<runs-dir>/evaluation_validation.json` (or `_test.json`; `--output` changes it).
 
 - A checkpoint trained for another fold, or on images preprocessed with other settings, is refused.
 - Choosing the setting on the validation predictions tunes it on data it was scored on, so it is slightly optimistic. Choose one setting for all folds (not one per fold, which would fit 15 to 19 images with a mass each), then score the test set once.
@@ -205,7 +217,7 @@ Each probability map is turned into a prediction under every combination of a **
   - Fold 3 is the weak one. Its false-alarm rate jumps between 0.04 and 0.96 from one epoch to the next, even at a small learning rate, so on normal tissue the predicted probabilities probably lie close to the threshold of 0.5 (not tested). A threshold and a minimum size of the predicted regions are the cheapest things to try.
   - Crops, a batch of 8 and 512 samples per epoch were changed together, so the effect of the crop alone is not separated. Nothing here uses the held-out test set.
 - **The crop runs collapsed again when the padding left the loss.** With the padding of a crop not valid (PR #22) and otherwise the same settings and patches (the image and mask tensors were checked to be identical on 51 patches; only the valid pixels differed, 12.7% of them on average), folds 0 and 1 gave a validation Dice of 0.02 on images with a mass and a false-alarm rate of 1.000 from epoch 1 to 60, while the training loss was almost the same as in the run that worked (0.625 against 0.624 at epoch 60).
-- The false-alarm rate counts one predicted pixel as a false alarm, so it was 1.000 in almost every whole-image run and does not discriminate well. A companion that ignores very small predicted regions, or the predicted area on images without a mass, is needed.
+- The false-alarm rate counts one predicted pixel as a false alarm, so it was 1.000 in almost every whole-image run and does not discriminate well. `mammo-seg evaluate` now adds a minimum region size, the predicted area on images without a mass, and the false regions per image (see above).
 - **Not tried:** batches with a fixed composition on the real data (implemented, see section 4), training with the background kept at 0 and the padding in the loss (the fix below), other GPUs, the held-out test set, thresholds other than 0.5, post-processing of the predicted regions, changes of the loss, a warm-up or lower encoder learning rate, averaging of weights, and other crop sizes.
 
 #### The flat background

@@ -41,7 +41,7 @@ def result(**overrides: Any) -> TrainingResult:
 def test_the_choices_are_those_of_the_engine() -> None:
     assert cli.SELECTION_METRICS == SELECTION_METRICS
     assert cli.DEFAULT_THRESHOLDS == evaluate_module.DEFAULT_THRESHOLDS
-    assert cli.DEFAULT_MIN_AREAS == evaluate_module.DEFAULT_MIN_AREAS
+    assert cli.DEFAULT_MIN_AREAS_MM2 == evaluate_module.DEFAULT_MIN_AREAS_MM2
     assert cli.ARCHITECTURES == get_args(Architecture)
 
 
@@ -361,9 +361,9 @@ def evaluate_args(project: Project, *extra: str) -> list[str]:
         "2",
         "--thresholds",
         "0.5",
-        "--min-areas",
+        "--min-areas-mm2",
         "0",
-        "50",
+        "5",
         *extra,
     ]
 
@@ -383,7 +383,7 @@ def test_the_evaluate_defaults_cover_the_five_folds() -> None:
     args = cli.build_parser().parse_args(["evaluate"])
     assert args.folds == [0, 1, 2, 3, 4] and args.checkpoint_name == "last.pt"
     assert args.thresholds == list(cli.DEFAULT_THRESHOLDS)
-    assert args.min_areas == list(cli.DEFAULT_MIN_AREAS)
+    assert args.min_areas_mm2 == list(cli.DEFAULT_MIN_AREAS_MM2)
     assert not args.test and args.output is None and args.runs_dir == Path("runs")
 
 
