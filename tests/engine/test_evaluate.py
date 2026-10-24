@@ -26,9 +26,11 @@ from mammo_seg.engine.evaluate import (
     DEFAULT_MIN_AREAS_MM2,
     DEFAULT_THRESHOLDS,
     Evaluation,
+    FalseRegion,
     FoldEvaluation,
     ImageInfo,
     ImageResult,
+    MassResult,
     PostProcessing,
     SettingResult,
     best_setting,
@@ -145,61 +147,91 @@ def square(rows: slice, cols: slice, size: int = 20) -> np.ndarray:
 MASS = square(slice(2, 6), slice(2, 6))  # 16 pixels
 
 
+def match(
+    predicted: np.ndarray, truth: np.ndarray, pixel_area_mm2: float
+) -> tuple[tuple[MassResult, ...], tuple[FalseRegion, ...]]:
+    """``match_lesions`` with the prediction as its own probability map."""
+    return match_lesions(predicted, truth, pixel_area_mm2, predicted.astype(np.float32))
+
+
 def test_a_mass_is_found_by_a_region_that_overlaps_it_enough() -> None:
     half = square(slice(2, 4), slice(2, 6))  # 8 of its pixels: IoU 0.5
-    masses, false_regions = match_lesions(half, MASS, 1.0)
+    masses, false_regions = match(half, MASS, 1.0)
     assert [mass.found for mass in masses] == [True] and len(false_regions) == 0
 
 
 def test_a_region_far_larger_than_the_mass_misses_it_and_is_false() -> None:
     everything = np.ones((20, 20), dtype=bool)  # IoU 16 / 400 = 0.04
-    masses, false_regions = match_lesions(everything, MASS, 1.0)
+    masses, false_regions = match(everything, MASS, 1.0)
     assert [mass.found for mass in masses] == [False] and len(false_regions) == 1
 
 
 def test_a_region_away_from_every_mass_is_a_false_region() -> None:
     elsewhere = square(slice(15, 17), slice(15, 17))
-    masses, false_regions = match_lesions(MASS | elsewhere, MASS, 1.0)
+    masses, false_regions = match(MASS | elsewhere, MASS, 1.0)
     assert [mass.found for mass in masses] == [True] and len(false_regions) == 1
 
 
 def test_one_region_can_find_two_masses() -> None:
     two = MASS | square(slice(2, 6), slice(8, 12))
     across = square(slice(2, 6), slice(2, 12))  # 40 pixels: IoU 0.4 with each
-    masses, false_regions = match_lesions(across, two, 1.0)
+    masses, false_regions = match(across, two, 1.0)
     assert [mass.found for mass in masses] == [True, True] and len(false_regions) == 0
 
 
 def test_two_regions_on_one_mass_are_both_true() -> None:
     parts = square(slice(2, 4), slice(2, 6)) | square(slice(5, 6), slice(2, 6))
-    masses, false_regions = match_lesions(parts, MASS, 1.0)
+    masses, false_regions = match(parts, MASS, 1.0)
     assert [mass.found for mass in masses] == [True] and len(false_regions) == 0
 
 
 def test_the_area_of_a_mass_is_in_mm2() -> None:
-    (mass,), _ = match_lesions(np.zeros((20, 20), dtype=bool), MASS, 0.5)
+    (mass,), _ = match(np.zeros((20, 20), dtype=bool), MASS, 0.5)
     assert mass.area_mm2 == 8.0 and not mass.found
 
 
 def test_a_mass_has_its_best_iou_and_its_centre() -> None:
     half = square(slice(2, 4), slice(2, 6))  # rows 2-3, columns 2-5
-    ((mass,), _) = match_lesions(half, MASS, 1.0)
+    ((mass,), _) = match(half, MASS, 1.0)
     assert mass.iou == 0.5  # 8 of 16 pixels, no pixel outside the mass
     assert (mass.row, mass.col) == (3.5, 3.5)  # rows 2-5 and columns 2-5
-    ((missed,), _) = match_lesions(np.zeros((20, 20), dtype=bool), MASS, 1.0)
+    ((missed,), _) = match(np.zeros((20, 20), dtype=bool), MASS, 1.0)
     assert missed.iou == 0.0 and not missed.found
 
 
 def test_a_false_region_has_its_area_and_its_centre() -> None:
     elsewhere = square(slice(15, 17), slice(10, 14))  # 8 pixels
-    _, (region,) = match_lesions(MASS | elsewhere, MASS, 0.5)
+    _, (region,) = match(MASS | elsewhere, MASS, 0.5)
     assert region.area_mm2 == 4.0
     assert (region.row, region.col) == (15.5, 11.5)
 
 
+def test_a_missed_mass_keeps_the_highest_probability_inside_it() -> None:
+    probabilities = np.full((20, 20), 0.05, dtype=np.float32)
+    probabilities[3, 4] = 0.3  # inside the mass, under any threshold
+    probabilities[16, 16] = 0.9  # a false region
+    predicted = probabilities >= 0.5
+    (mass,), (region,) = match_lesions(predicted, MASS, 1.0, probabilities)
+    assert not mass.found and mass.peak == pytest.approx(0.3)
+    assert region.peak == pytest.approx(0.9)
+
+
+def test_a_found_mass_has_its_peak_from_the_whole_mass() -> None:
+    probabilities = np.zeros((20, 20), dtype=np.float32)
+    probabilities[2:4, 2:6] = 0.6  # the half that is predicted
+    probabilities[2, 2] = 0.8
+    (mass,), _ = match_lesions(probabilities >= 0.5, MASS, 1.0, probabilities)
+    assert mass.found and mass.peak == pytest.approx(0.8)
+
+
+def test_the_probabilities_must_have_the_shape_of_the_mask() -> None:
+    with pytest.raises(ValueError, match="probabilities of shape"):
+        match_lesions(MASS, MASS, 1.0, np.zeros((20, 19), dtype=np.float32))
+
+
 def test_without_masses_and_regions_there_is_nothing_to_count() -> None:
     empty = np.zeros((20, 20), dtype=bool)
-    assert match_lesions(empty, empty, 1.0) == ((), ())
+    assert match(empty, empty, 1.0) == ((), ())
 
 
 # --- scoring a batch ---
@@ -282,6 +314,15 @@ def test_a_batch_is_scored_per_lesion_on_the_valid_pixels() -> None:
     assert cleaned.false_regions == ()
     (nothing,) = score_batch(*batch(False), PostProcessing(0.5, 0), [ONE_MM2])
     assert nothing.masses == () and len(nothing.false_regions) == 1
+
+
+def test_a_mass_missed_at_a_high_threshold_keeps_its_peak() -> None:
+    (strict,) = score_batch(*batch(True), PostProcessing(0.95, 0), [ONE_MM2])
+    (mass,) = strict.masses
+    assert not mass.found and mass.peak == pytest.approx(0.9)
+    assert strict.false_regions == ()  # the 0.99 column is not valid
+    (kept,) = score_batch(*batch(True), PostProcessing(0.5, 0), [ONE_MM2])
+    assert [region.peak for region in kept.false_regions] == [pytest.approx(0.9)]
 
 
 def test_the_same_area_in_mm2_removes_more_pixels_on_a_finer_image() -> None:
@@ -712,7 +753,7 @@ def test_the_details_hold_every_image_under_every_setting(
     with_mass = [image for image in images if image["has_mass"]]
     assert len(with_mass) == 4
     (mass,) = with_mass[0]["results"][0]["masses"]
-    assert set(mass) == {"area_mm2", "found", "iou", "row", "col"}
+    assert set(mass) == {"area_mm2", "found", "iou", "row", "col", "peak"}
 
 
 def test_the_text_shows_the_sweep_the_baseline_and_the_folds(
