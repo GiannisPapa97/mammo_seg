@@ -6,7 +6,8 @@ normalize the intensities. The same code runs for training (where the first step
 are cached on disk) and for inference, so both see identical input.
 
 ``preprocess`` runs the first four steps on an image and ``preprocess_mask`` applies
-the same geometry to its mask. Both return or use a ``PreprocessParams`` record
+the same geometry to its mask (``preprocess_points`` to points, such as the
+polygons of the annotations). Both return or use a ``PreprocessParams`` record
 (crop box, output size, flip) that ``restore_mask`` uses to map a predicted mask
 back onto the original image.
 """
@@ -264,6 +265,28 @@ def preprocess_mask(mask: Mask, params: PreprocessParams) -> Mask:
         raise ValueError("the crop box cuts the mask: part of a lesion is outside it")
     result = (_resize(cropped, params.shape) >= 0.5).astype(np.uint8)
     return np.ascontiguousarray(result[:, ::-1]) if params.flipped else result
+
+
+def preprocess_points(
+    points: npt.ArrayLike, params: PreprocessParams
+) -> npt.NDArray[np.float64]:
+    """Apply the geometry of ``preprocess`` to ``[n, 2]`` points ``(x, y)`` of the
+    source image, such as the polygon of an ROI.
+
+    Coordinates are continuous: pixel ``i`` spans ``[i, i + 1)``, as for the
+    polygons. Points outside the crop box map outside the result. Raises ValueError
+    for points that are not ``[n, 2]``.
+    """
+    array = np.asarray(points, dtype=np.float64)
+    if array.ndim != 2 or array.shape[1] != 2:
+        raise ValueError(f"expected [n, 2] points (x, y), got shape {array.shape}")
+    box = params.box
+    rows, cols = params.shape
+    x = (array[:, 0] - box.left) * cols / box.width
+    y = (array[:, 1] - box.top) * rows / box.height
+    if params.flipped:
+        x = cols - x
+    return np.column_stack([x, y])
 
 
 def restore_mask(mask: Mask, params: PreprocessParams) -> Mask:

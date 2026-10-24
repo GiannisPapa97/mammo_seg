@@ -9,11 +9,13 @@ import nbformat
 import pytest
 
 from mammo_seg import cli
+from mammo_seg.engine.evaluate import DEFAULT_MIN_AREAS_MM2, DEFAULT_THRESHOLDS
 
 NOTEBOOKS = sorted(Path("notebooks").glob("*.ipynb"))
 KAGGLE = Path("notebooks/05_kaggle_training.ipynb")
 EVALUATION = Path("notebooks/06_kaggle_evaluation.ipynb")
 COMPARISON = Path("notebooks/08_kaggle_whole_vs_patches.ipynb")
+ERRORS = Path("notebooks/09_error_analysis.ipynb")
 DATA_STEPS = {"manifest", "splits", "masks", "preprocess"}
 
 
@@ -173,3 +175,11 @@ def test_a_kaggle_notebook_records_the_commit_of_its_code(
     assert len(recorded) == 1 and "tee -a {VERSION}" in recorded[0]
     code = "".join("".join(c["source"]) for c in read(notebook)["cells"])
     assert f'VERSION = {folder} / "code_version.txt"' in code
+
+
+def test_the_error_analysis_looks_at_a_setting_the_evaluation_tries() -> None:
+    settings = settings_of(ERRORS, "THRESHOLD", "MIN_AREA_MM2", "NEAR_MM", "CHEST_WALL")
+    # Only the settings of the evaluation are in the details file.
+    assert settings["THRESHOLD"] in DEFAULT_THRESHOLDS
+    assert settings["MIN_AREA_MM2"] in DEFAULT_MIN_AREAS_MM2
+    assert settings["NEAR_MM"] > 0 and 0 < settings["CHEST_WALL"] < 1
