@@ -88,6 +88,10 @@ uv run mammo-seg train --fold 0 --resume    # continue after a stop
 
 On Kaggle use [notebooks/05_kaggle_training.ipynb](notebooks/05_kaggle_training.ipynb), which rebuilds the data from the attached dataset, trains one or more folds and stops cleanly before the session limit. To score the trained folds (thresholds, minimum region size, masses found and false regions per image, subgroups, the baseline of predicting nothing) use `uv run mammo-seg evaluate --runs-dir runs`, or [notebooks/06_kaggle_evaluation.ipynb](notebooks/06_kaggle_evaluation.ipynb) on Kaggle. To compare training on whole images with training on patches over the five folds, use [notebooks/08_kaggle_whole_vs_patches.ipynb](notebooks/08_kaggle_whole_vs_patches.ipynb). See [docs/training.md](docs/training.md) for the settings, the files a run writes, and what has been tried.
 
+## Results
+
+Milestone experiments keep their scores and settings locally in `results/<date>_<subject>/` (git-ignored); only each experiment's `README.md`, with the code commit it used and its headline numbers, is tracked. See [results/README.md](results/README.md).
+
 ## License
 
 Code: [MIT](LICENSE). Datasets have their own licenses and terms and are not covered by it.

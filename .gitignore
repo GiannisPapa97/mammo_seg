@@ -36,3 +36,7 @@ coverage.xml
 /outputs/
 /runs/
 *.db
+
+# Results of milestone experiments: kept locally; only the README of each is tracked
+/results/*/*
+!/results/*/README.md
