@@ -232,6 +232,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="predict in one pass or in sliding windows "
         "(default: as each checkpoint was validated in training)",
     )
+    evaluate.add_argument(
+        "--details",
+        action="store_true",
+        help="also write every image with its results under every setting (its "
+        "masses and false regions) to <output>_details.json, for an analysis of the "
+        "errors",
+    )
     evaluate.add_argument("--batch-size", type=int, default=4)
     evaluate.add_argument("--num-workers", type=int, default=0)
     evaluate.add_argument(
@@ -360,6 +367,7 @@ def _evaluate(args: argparse.Namespace) -> int:
         from mammo_seg.data.dataset import canvas_of
         from mammo_seg.device import resolve_device
         from mammo_seg.engine.evaluate import (
+            details_to_dict,
             evaluate_folds,
             evaluation_to_dict,
             format_evaluation,
@@ -395,6 +403,9 @@ def _evaluate(args: argparse.Namespace) -> int:
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(evaluation_to_dict(evaluation), indent=2) + "\n")
+        details = output.with_name(f"{output.stem}_details.json")
+        if args.details:
+            details.write_text(json.dumps(details_to_dict(evaluation)) + "\n")
     except (OSError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -404,6 +415,8 @@ def _evaluate(args: argparse.Namespace) -> int:
         )
     print(format_evaluation(evaluation))
     print(f"\nAll results are in {output}")
+    if args.details:
+        print(f"Every image with its results is in {details}")
     return 0
 
 

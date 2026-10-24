@@ -32,6 +32,7 @@ from mammo_seg.engine.evaluate import (
     PostProcessing,
     SettingResult,
     best_setting,
+    details_to_dict,
     evaluate_folds,
     evaluate_model,
     evaluation_to_dict,
@@ -147,32 +148,32 @@ MASS = square(slice(2, 6), slice(2, 6))  # 16 pixels
 def test_a_mass_is_found_by_a_region_that_overlaps_it_enough() -> None:
     half = square(slice(2, 4), slice(2, 6))  # 8 of its pixels: IoU 0.5
     masses, false_regions = match_lesions(half, MASS, 1.0)
-    assert [mass.found for mass in masses] == [True] and false_regions == 0
+    assert [mass.found for mass in masses] == [True] and len(false_regions) == 0
 
 
 def test_a_region_far_larger_than_the_mass_misses_it_and_is_false() -> None:
     everything = np.ones((20, 20), dtype=bool)  # IoU 16 / 400 = 0.04
     masses, false_regions = match_lesions(everything, MASS, 1.0)
-    assert [mass.found for mass in masses] == [False] and false_regions == 1
+    assert [mass.found for mass in masses] == [False] and len(false_regions) == 1
 
 
 def test_a_region_away_from_every_mass_is_a_false_region() -> None:
     elsewhere = square(slice(15, 17), slice(15, 17))
     masses, false_regions = match_lesions(MASS | elsewhere, MASS, 1.0)
-    assert [mass.found for mass in masses] == [True] and false_regions == 1
+    assert [mass.found for mass in masses] == [True] and len(false_regions) == 1
 
 
 def test_one_region_can_find_two_masses() -> None:
     two = MASS | square(slice(2, 6), slice(8, 12))
     across = square(slice(2, 6), slice(2, 12))  # 40 pixels: IoU 0.4 with each
     masses, false_regions = match_lesions(across, two, 1.0)
-    assert [mass.found for mass in masses] == [True, True] and false_regions == 0
+    assert [mass.found for mass in masses] == [True, True] and len(false_regions) == 0
 
 
 def test_two_regions_on_one_mass_are_both_true() -> None:
     parts = square(slice(2, 4), slice(2, 6)) | square(slice(5, 6), slice(2, 6))
     masses, false_regions = match_lesions(parts, MASS, 1.0)
-    assert [mass.found for mass in masses] == [True] and false_regions == 0
+    assert [mass.found for mass in masses] == [True] and len(false_regions) == 0
 
 
 def test_the_area_of_a_mass_is_in_mm2() -> None:
@@ -180,9 +181,25 @@ def test_the_area_of_a_mass_is_in_mm2() -> None:
     assert mass.area_mm2 == 8.0 and not mass.found
 
 
+def test_a_mass_has_its_best_iou_and_its_centre() -> None:
+    half = square(slice(2, 4), slice(2, 6))  # rows 2-3, columns 2-5
+    ((mass,), _) = match_lesions(half, MASS, 1.0)
+    assert mass.iou == 0.5  # 8 of 16 pixels, no pixel outside the mass
+    assert (mass.row, mass.col) == (3.5, 3.5)  # rows 2-5 and columns 2-5
+    ((missed,), _) = match_lesions(np.zeros((20, 20), dtype=bool), MASS, 1.0)
+    assert missed.iou == 0.0 and not missed.found
+
+
+def test_a_false_region_has_its_area_and_its_centre() -> None:
+    elsewhere = square(slice(15, 17), slice(10, 14))  # 8 pixels
+    _, (region,) = match_lesions(MASS | elsewhere, MASS, 0.5)
+    assert region.area_mm2 == 4.0
+    assert (region.row, region.col) == (15.5, 11.5)
+
+
 def test_without_masses_and_regions_there_is_nothing_to_count() -> None:
     empty = np.zeros((20, 20), dtype=bool)
-    assert match_lesions(empty, empty, 1.0) == ((), 0)
+    assert match_lesions(empty, empty, 1.0) == ((), ())
 
 
 # --- scoring a batch ---
@@ -260,11 +277,11 @@ def test_a_batch_is_scored_per_lesion_on_the_valid_pixels() -> None:
     # the confident invalid column is not a region at all.
     (kept,) = score_batch(*batch(True), PostProcessing(0.5, 0), [ONE_MM2])
     assert [mass.found for mass in kept.masses] == [True]
-    assert kept.masses[0].area_mm2 == 16.0 and kept.false_regions == 1
+    assert kept.masses[0].area_mm2 == 16.0 and len(kept.false_regions) == 1
     (cleaned,) = score_batch(*batch(True), PostProcessing(0.5, 5), [ONE_MM2])
-    assert cleaned.false_regions == 0
+    assert cleaned.false_regions == ()
     (nothing,) = score_batch(*batch(False), PostProcessing(0.5, 0), [ONE_MM2])
-    assert nothing.masses == () and nothing.false_regions == 1
+    assert nothing.masses == () and len(nothing.false_regions) == 1
 
 
 def test_the_same_area_in_mm2_removes_more_pixels_on_a_finer_image() -> None:
@@ -403,6 +420,11 @@ def test_a_model_is_scored_under_every_setting_and_against_predicting_nothing(
     settings = [PostProcessing(0.5, 0), PostProcessing(0.5, 12)]
     record = read_record(tmp_path / "preprocessed" / RECORD_FILE)
     infos = image_infos(record, manifest, ids)
+    first = infos[ids[0]]
+    assert first.file_id == ids[0] and first.view in ("CC", "MLO")
+    assert first.patient_id == next(
+        image.patient_id for image in manifest.images if image.file_id == ids[0]
+    )
     results = evaluate_model(
         BrightPixels(), evaluation_loader(dataset, 3), settings, CPU, infos
     )
@@ -653,6 +675,44 @@ def test_the_results_become_json_with_none_for_undefined_values(
     assert pooled["masses"] == 4
     assert set(pooled["subgroups"]) == {"negatives", "masses", "density"}
     assert set(pooled["subgroups"]["negatives"]) == {"normal", "benign", "suspicious"}
+
+
+def test_every_scored_image_is_kept_with_its_fold(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    evaluation = evaluate(tmp_path, manifest)
+    assert len(evaluation.images) == 16
+    assert sorted({image.fold for image in evaluation.images}) == [0, 1]
+    assert all(len(image.results) == 2 for image in evaluation.images)  # 2 settings
+    assert "images" not in evaluation_to_dict(evaluation)
+
+
+def test_the_details_hold_every_image_under_every_setting(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    evaluation = evaluate(tmp_path, manifest)
+    details = json.loads(json.dumps(details_to_dict(evaluation)))
+    assert details["on"] == "validation" and details["hit_iou"] == 0.1
+    assert details["settings"] == [
+        {"threshold": 0.5, "min_area_mm2": 0.0},
+        {"threshold": 0.5, "min_area_mm2": 5.0},
+    ]
+    images = details["images"]
+    assert len(images) == 16
+    assert {image["file_id"] for image in images} == {
+        image.file_id for image in manifest.images
+    }
+    first = images[0]
+    assert set(first) >= {"fold", "file_id", "patient_id", "view", "birads", "acr"}
+    assert set(first) >= {"has_mass", "pixel_area_mm2", "results"}
+    assert len(first["results"]) == 2
+    result = first["results"][0]
+    assert set(result) >= {"dice", "sensitivity", "predicted", "predicted_pixels"}
+    assert set(result) >= {"masses", "false_regions"}
+    with_mass = [image for image in images if image["has_mass"]]
+    assert len(with_mass) == 4
+    (mass,) = with_mass[0]["results"][0]["masses"]
+    assert set(mass) == {"area_mm2", "found", "iou", "row", "col"}
 
 
 def test_the_text_shows_the_sweep_the_baseline_and_the_folds(

@@ -183,6 +183,8 @@ Below, the same setting **by subgroup**, all folds pooled, with the thresholds o
 
 Everything, the subgroups of every setting included, is also written to `<runs-dir>/evaluation_validation.json` (or `_test.json`; `--output` changes it).
 
+**Per image** (`--details`): every scored image with its results under every setting is also written to `<output>_details.json` (for example `evaluation_validation_details.json`), for an analysis of the errors. An image has its fold, file id, patient id, view, BI-RADS, ACR density and pixel area, and per setting its scores, its masses (area in mm², found or not, the best IoU of a predicted region with it, and its centre in pixels of the preprocessed image) and its false regions (area in mm² and centre). The `results` of an image are in the order of `settings`. It holds scores and positions only, no images: a few MB for the five folds.
+
 - A checkpoint trained for another fold, or on images preprocessed with other settings, is refused.
 - Each model predicts as its checkpoint records: in sliding windows if it was trained on crops, in one pass otherwise. `--inference whole` or `--inference sliding` overrides that, for example to score a patch model in one pass; sliding windows need a checkpoint that records its window, which those made before this option do not.
 - Choosing the setting on the validation predictions tunes it on data it was scored on, so it is slightly optimistic. Choose one setting for all folds (not one per fold, which would fit 15 to 19 images with a mass each), then score the test set once.
