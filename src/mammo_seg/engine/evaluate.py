@@ -5,9 +5,11 @@ did not train on (its own validation fold, or the test set) and scores them with
 the metrics of ``metrics.py`` under a grid of post-processing settings:
 
 - a **threshold** on the predicted probability, and
-- a **minimum region size**: connected regions of predicted pixels smaller than this
-  are removed (8-connectivity), so a stray spot of a few pixels no longer counts as
-  a false alarm.
+- a **minimum region size** in mm²: connected regions of predicted pixels smaller
+  than this are removed (8-connectivity), so a stray spot of a few pixels no longer
+  counts as a false alarm. It is in mm², not pixels, because a preprocessed pixel
+  covers 0.13 to 0.28 mm depending on the size of the breast; its area comes from
+  the preprocessing record (``pixel_area_mm2``).
 
 Scoring a validation fold with the model that did not train on it, for every fold,
 gives out-of-fold predictions for all development images; the results of the folds
@@ -20,7 +22,7 @@ Dice of 1 on every image without a mass.
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -34,15 +36,22 @@ from torch.utils.data import DataLoader
 from mammo_seg.data.dataset import DEFAULT_CANVAS, MammogramDataset, Sample
 from mammo_seg.data.folds import fold_ids, held_out_ids
 from mammo_seg.data.loaders import evaluation_loader
-from mammo_seg.data.preprocessing import PreprocessingSettings
+from mammo_seg.data.preprocess_dataset import (
+    RECORD_FILE,
+    PreprocessingRecord,
+    read_record,
+)
+from mammo_seg.data.preprocessing import PreprocessingSettings, PreprocessParams
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile, fold_name
+from mammo_seg.data.strata import INBREAST_PIXEL_SIZE_MM
 from mammo_seg.device import resolve_device
 from mammo_seg.engine.checkpoint import load_checkpoint, model_from_checkpoint
 from mammo_seg.engine.metrics import ImageScores, Summary, image_scores, summarize
 
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
-DEFAULT_MIN_AREAS = (0, 100, 300, 1000)
+# The smallest INbreast mass is 14.7 mm², so these never remove a whole mass.
+DEFAULT_MIN_AREAS_MM2 = (0.0, 2.0, 5.0, 10.0)
 _EIGHT_CONNECTED = np.ones((3, 3), dtype=int)
 
 
@@ -51,23 +60,54 @@ class PostProcessing:
     """How a probability map becomes a prediction."""
 
     threshold: float = 0.5
-    min_area: int = 0  # pixels; regions with fewer pixels are removed
+    min_area_mm2: float = 0.0  # regions smaller than this are removed
 
     def __post_init__(self) -> None:
         if not 0 < self.threshold < 1:
             raise ValueError(f"the threshold must be in (0, 1), got {self.threshold}")
-        if self.min_area < 0:
-            raise ValueError(f"the minimum area cannot be negative: {self.min_area}")
+        if self.min_area_mm2 < 0:
+            raise ValueError(
+                f"the minimum area cannot be negative: {self.min_area_mm2}"
+            )
+
+    def min_pixels(self, pixel_area_mm2: float) -> int:
+        """The minimum region size in pixels of ``pixel_area_mm2`` each."""
+        return math.ceil(self.min_area_mm2 / pixel_area_mm2)
 
 
 def settings_grid(
     thresholds: Sequence[float] = DEFAULT_THRESHOLDS,
-    min_areas: Sequence[int] = DEFAULT_MIN_AREAS,
+    min_areas_mm2: Sequence[float] = DEFAULT_MIN_AREAS_MM2,
 ) -> tuple[PostProcessing, ...]:
     """Every threshold with every minimum region size."""
-    if not thresholds or not min_areas:
+    if not thresholds or not min_areas_mm2:
         raise ValueError("at least one threshold and one minimum area are needed")
-    return tuple(PostProcessing(t, a) for t in thresholds for a in min_areas)
+    return tuple(PostProcessing(t, a) for t in thresholds for a in min_areas_mm2)
+
+
+@dataclass(frozen=True)
+class ImageInfo:
+    """What the scoring needs to know about an image besides its tensors."""
+
+    pixel_area_mm2: float  # the area of one preprocessed pixel
+
+
+def pixel_area_mm2(
+    params: PreprocessParams, native_pixel_mm: float = INBREAST_PIXEL_SIZE_MM
+) -> float:
+    """The area in mm² of one pixel of an image preprocessed with ``params``."""
+    rows, cols = params.shape
+    return (params.box.height / rows) * (params.box.width / cols) * native_pixel_mm**2
+
+
+def image_infos(
+    record: PreprocessingRecord, file_ids: Sequence[str]
+) -> dict[str, ImageInfo]:
+    """The ``ImageInfo`` of every image of ``file_ids``, from the preprocessing."""
+    return {
+        file_id: ImageInfo(pixel_area_mm2(record.images[file_id]))
+        for file_id in file_ids
+    }
 
 
 def remove_small_regions(prediction: torch.Tensor, min_area: int) -> torch.Tensor:
@@ -92,20 +132,27 @@ def score_batch(
     masks: torch.Tensor,
     valid: torch.Tensor,
     setting: PostProcessing,
+    infos: Sequence[ImageInfo],
 ) -> list[ImageResult]:
-    """The scores of every image of a batch of ``[B, 1, H, W]`` CPU tensors.
+    """The scores of every image of a batch of ``[B, 1, H, W]`` CPU tensors, with
+    the ``ImageInfo`` of each image.
 
-    Raises ValueError for tensors of different shapes.
+    Raises ValueError for tensors of different shapes or a wrong number of infos.
     """
     if not probabilities.shape == masks.shape == valid.shape:
         raise ValueError(
             f"shapes differ: probabilities {tuple(probabilities.shape)}, masks "
             f"{tuple(masks.shape)}, valid {tuple(valid.shape)}"
         )
+    if len(infos) != len(probabilities):
+        raise ValueError(f"{len(infos)} infos for {len(probabilities)} images")
     valid = valid.bool()
     predicted = (probabilities >= setting.threshold) & valid
     cleaned = torch.stack(
-        [remove_small_regions(image[0], setting.min_area) for image in predicted]
+        [
+            remove_small_regions(image[0], setting.min_pixels(info.pixel_area_mm2))
+            for image, info in zip(predicted, infos, strict=True)
+        ]
     ).unsqueeze(1)
     scores = image_scores(cleaned.float(), masks, valid)
     pixels = cleaned.flatten(1).sum(1).tolist()
@@ -157,9 +204,11 @@ def evaluate_model(
     loader: DataLoader[Sample],
     settings: Sequence[PostProcessing],
     device: torch.device,
+    infos: Mapping[str, ImageInfo],
     amp: bool = False,
 ) -> ModelResults:
-    """Predict every image of the loader once and score it under every setting."""
+    """Predict every image of the loader once and score it under every setting;
+    ``infos`` holds the ``ImageInfo`` of every image, by file id."""
     model.eval()
     results: dict[PostProcessing, list[ImageResult]] = {s: [] for s in settings}
     baseline: list[ImageResult] = []
@@ -168,10 +217,13 @@ def evaluate_model(
             logits = model(batch["image"].to(device, non_blocking=True))
         probabilities = torch.sigmoid(logits.float()).cpu()
         masks, valid = batch["mask"], batch["valid"]
+        batch_infos = [infos[file_id] for file_id in batch["file_id"]]
         for setting in settings:
-            results[setting] += score_batch(probabilities, masks, valid, setting)
+            results[setting] += score_batch(
+                probabilities, masks, valid, setting, batch_infos
+            )
         baseline += score_batch(
-            torch.zeros_like(probabilities), masks, valid, PostProcessing()
+            torch.zeros_like(probabilities), masks, valid, PostProcessing(), batch_infos
         )
     return ModelResults(results, baseline)
 
@@ -231,6 +283,7 @@ def evaluate_folds(
     if not folds or len(set(folds)) != len(folds):
         raise ValueError(f"the folds must be given once each, got {list(folds)}")
     device = device or resolve_device()
+    record = read_record(preprocessed_dir / RECORD_FILE)
     per_fold: dict[int, FoldEvaluation] = {}
     pooled = ModelResults({s: [] for s in settings}, [])
     for fold in folds:
@@ -260,6 +313,7 @@ def evaluate_folds(
             evaluation_loader(dataset, batch_size, num_workers),
             settings,
             device,
+            image_infos(record, ids),
             amp,
         )
         per_fold[fold] = _fold_evaluation(results)
@@ -303,7 +357,7 @@ def _show(value: float, digits: int = 3) -> str:
 
 
 _HEADER = (
-    f"{'threshold':>9} {'min area':>8}  | {'mass Dice':>9} {'sens.':>6} {'prec.':>6} | "
+    f"{'threshold':>9} {'min mm²':>8}  | {'mass Dice':>9} {'sens.':>6} {'prec.':>6} | "
     f"{'false alarms':>12} {'FP pixels':>9} | {'all Dice':>8} {'balanced':>8}"
 )
 
@@ -321,7 +375,7 @@ def _row(label: str, result: SettingResult) -> str:
 
 
 def _label(result: SettingResult, mark: str = " ") -> str:
-    return f"{result.setting.threshold:>9.2f} {result.setting.min_area:>8}{mark}"
+    return f"{result.setting.threshold:>9.2f} {result.setting.min_area_mm2:>8g}{mark}"
 
 
 def format_evaluation(evaluation: Evaluation) -> str:
@@ -341,7 +395,7 @@ def format_evaluation(evaluation: Evaluation) -> str:
     lines += [
         "",
         f"per fold at threshold {best.setting.threshold}, "
-        f"min area {best.setting.min_area}:",
+        f"min area {best.setting.min_area_mm2:g} mm²:",
         _HEADER,
     ]
     for fold, evaluated in evaluation.per_fold.items():
