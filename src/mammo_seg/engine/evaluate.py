@@ -31,6 +31,11 @@ Each model predicts the whole image as it was validated in training: in sliding
 windows of its training canvas if it was trained on crops, in one pass otherwise
 (the checkpoint records which; ``inference`` overrides it).
 
+The evaluation also keeps every image with its results under every setting
+(``Evaluation.images``): its fold, its identity, its scores, each of its masses (area,
+found or not, best IoU, centre) and each false region (area, centre).
+``details_to_dict`` turns them into plain values, for an analysis of the errors.
+
 Scoring a validation fold with the model that did not train on it, for every fold,
 gives out-of-fold predictions for all development images; the results of the folds
 are pooled by concatenating the per-image scores. Choosing a setting on these
@@ -465,12 +470,23 @@ class FoldEvaluation:
 
 
 @dataclass(frozen=True)
+class ImageDetail:
+    """One scored image: the fold whose model scored it, and its results under
+    every setting."""
+
+    fold: int
+    results: tuple[ImageResult, ...]
+
+
+@dataclass(frozen=True)
 class Evaluation:
     on: str  # "validation" or "test"
     checkpoint: str
     per_fold: dict[int, FoldEvaluation]
     inference: dict[int, str]  # how each fold's model predicted: "whole" or "sliding"
     pooled: FoldEvaluation
+    # Every image with its results, in the order of the settings of the summaries.
+    images: tuple[ImageDetail, ...]
 
 
 def _fold_evaluation(model_results: ModelResults) -> FoldEvaluation:
@@ -517,6 +533,7 @@ def evaluate_folds(
     record = read_record(preprocessed_dir / RECORD_FILE)
     per_fold: dict[int, FoldEvaluation] = {}
     used: dict[int, str] = {}
+    images: list[ImageDetail] = []
     pooled = ModelResults({s: [] for s in settings}, [])
     for fold in folds:
         path = runs_dir / fold_name(fold) / checkpoint_name
@@ -560,6 +577,10 @@ def evaluate_folds(
         )
         used[fold] = chosen
         per_fold[fold] = _fold_evaluation(results)
+        images += [
+            ImageDetail(fold, tuple(results.settings[s][index] for s in settings))
+            for index in range(len(results.baseline))
+        ]
         for setting in settings:
             pooled.settings[setting].extend(results.settings[setting])
         pooled.baseline.extend(results.baseline)
@@ -569,6 +590,7 @@ def evaluate_folds(
         per_fold=per_fold,
         inference=used,
         pooled=_fold_evaluation(pooled),
+        images=tuple(images),
     )
 
 
@@ -583,8 +605,51 @@ def _json_safe(value: Any) -> Any:
 
 
 def evaluation_to_dict(evaluation: Evaluation) -> dict[str, Any]:
-    """The evaluation as plain values for JSON; NaN becomes None."""
+    """The summaries of the evaluation as plain values for JSON (without the
+    images, see ``details_to_dict``); NaN becomes None."""
     content: dict[str, Any] = _json_safe(asdict(evaluation))
+    del content["images"]
+    return content
+
+
+def details_to_dict(evaluation: Evaluation) -> dict[str, Any]:
+    """Every image of the evaluation with its results under every setting, as plain
+    values for JSON; NaN becomes None. The ``results`` of an image are in the order
+    of ``settings``."""
+    settings = [result.setting for result in evaluation.pooled.settings]
+    images = []
+    for image in evaluation.images:
+        info = image.results[0].info if image.results else None
+        images.append(
+            {
+                "fold": image.fold,
+                **(asdict(info) if info is not None else {}),
+                "has_mass": bool(image.results and image.results[0].scores.has_mass),
+                "results": [
+                    {
+                        **{
+                            key: value
+                            for key, value in asdict(result.scores).items()
+                            if key != "has_mass"
+                        },
+                        "predicted_pixels": result.predicted_pixels,
+                        "masses": [asdict(mass) for mass in result.masses],
+                        "false_regions": [asdict(r) for r in result.false_regions],
+                    }
+                    for result in image.results
+                ],
+            }
+        )
+    content: dict[str, Any] = _json_safe(
+        {
+            "on": evaluation.on,
+            "checkpoint": evaluation.checkpoint,
+            "inference": evaluation.inference,
+            "hit_iou": HIT_IOU,
+            "settings": [asdict(setting) for setting in settings],
+            "images": images,
+        }
+    )
     return content
 
 

@@ -32,6 +32,7 @@ from mammo_seg.engine.evaluate import (
     PostProcessing,
     SettingResult,
     best_setting,
+    details_to_dict,
     evaluate_folds,
     evaluate_model,
     evaluation_to_dict,
@@ -674,6 +675,44 @@ def test_the_results_become_json_with_none_for_undefined_values(
     assert pooled["masses"] == 4
     assert set(pooled["subgroups"]) == {"negatives", "masses", "density"}
     assert set(pooled["subgroups"]["negatives"]) == {"normal", "benign", "suspicious"}
+
+
+def test_every_scored_image_is_kept_with_its_fold(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    evaluation = evaluate(tmp_path, manifest)
+    assert len(evaluation.images) == 16
+    assert sorted({image.fold for image in evaluation.images}) == [0, 1]
+    assert all(len(image.results) == 2 for image in evaluation.images)  # 2 settings
+    assert "images" not in evaluation_to_dict(evaluation)
+
+
+def test_the_details_hold_every_image_under_every_setting(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    evaluation = evaluate(tmp_path, manifest)
+    details = json.loads(json.dumps(details_to_dict(evaluation)))
+    assert details["on"] == "validation" and details["hit_iou"] == 0.1
+    assert details["settings"] == [
+        {"threshold": 0.5, "min_area_mm2": 0.0},
+        {"threshold": 0.5, "min_area_mm2": 5.0},
+    ]
+    images = details["images"]
+    assert len(images) == 16
+    assert {image["file_id"] for image in images} == {
+        image.file_id for image in manifest.images
+    }
+    first = images[0]
+    assert set(first) >= {"fold", "file_id", "patient_id", "view", "birads", "acr"}
+    assert set(first) >= {"has_mass", "pixel_area_mm2", "results"}
+    assert len(first["results"]) == 2
+    result = first["results"][0]
+    assert set(result) >= {"dice", "sensitivity", "predicted", "predicted_pixels"}
+    assert set(result) >= {"masses", "false_regions"}
+    with_mass = [image for image in images if image["has_mass"]]
+    assert len(with_mass) == 4
+    (mass,) = with_mass[0]["results"][0]["masses"]
+    assert set(mass) == {"area_mm2", "found", "iou", "row", "col"}
 
 
 def test_the_text_shows_the_sweep_the_baseline_and_the_folds(

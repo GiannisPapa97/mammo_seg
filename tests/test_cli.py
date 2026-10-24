@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from typing import Any, get_args
@@ -414,6 +415,7 @@ def test_the_evaluate_defaults_cover_the_five_folds() -> None:
     assert args.thresholds == list(cli.DEFAULT_THRESHOLDS)
     assert args.min_areas_mm2 == list(cli.DEFAULT_MIN_AREAS_MM2)
     assert args.inference is None
+    assert not args.details
     assert not args.test and args.output is None and args.runs_dir == Path("runs")
 
 
@@ -428,6 +430,18 @@ def test_evaluate_prints_the_sweep_and_writes_the_results(
     results = project.output / "evaluation_validation.json"
     assert results.is_file() and str(results) in out
     assert '"on": "validation"' in results.read_text()
+
+
+def test_evaluate_writes_the_details_when_asked(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    save_runs(project)
+    details = project.output / "evaluation_validation_details.json"
+    assert cli.main(evaluate_args(project, "--folds", "0", "1")) == 0
+    assert not details.exists()
+    assert cli.main(evaluate_args(project, "--folds", "0", "1", "--details")) == 0
+    assert str(details) in capsys.readouterr().out
+    assert len(json.loads(details.read_text())["images"]) == 16
 
 
 def test_evaluate_can_write_the_results_elsewhere(

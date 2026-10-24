@@ -91,7 +91,8 @@ def test_the_kaggle_notebook_settings_are_valid() -> None:
 
 
 def test_the_evaluation_notebook_settings_are_valid() -> None:
-    settings = settings_of(EVALUATION, "FOLDS", "EVALUATE_OPTIONS")
+    settings = settings_of(EVALUATION, "FOLDS", "EVALUATE_OPTIONS", "DESIGN")
+    assert settings["DESIGN"] in (None, "whole", "patches")
     assert settings["FOLDS"] and set(settings["FOLDS"]) <= set(range(5))
     cli.build_parser().parse_args(
         ["evaluate", *shlex.split(settings["EVALUATE_OPTIONS"])]
