@@ -140,8 +140,9 @@ class EpochRecord:
 
 
 # Settings that may differ between the sessions of one run: they do not change what
-# is learned (mixed precision only changes the arithmetic).
-_FREE_ON_RESUME = ("num_workers", "amp")
+# is learned (mixed precision only changes the arithmetic). The number of workers
+# does: the workers share the samples, so it changes the random draws.
+_FREE_ON_RESUME = ("amp",)
 _SETTINGS = TypeAdapter(TrainingSettings)
 
 StopReason = Literal["finished", "early_stopping", "time_limit"]
@@ -428,8 +429,8 @@ def fit(
     refuses a checkpoint whose values differ.
 
     ``resume=True`` continues from ``output_dir/last.pt`` and raises ValueError if
-    there is none or it was made with other settings (the number of workers and
-    mixed precision may differ). Training stops early after ``settings.patience``
+    there is none or it was made with other settings (only mixed precision may
+    differ). Training stops early after ``settings.patience``
     epochs without improvement, and stops before an epoch that would not end within
     ``time_limit_minutes`` of the start of this call; at least one epoch is always
     run, so repeated sessions make progress.

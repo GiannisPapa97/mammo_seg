@@ -76,6 +76,7 @@ def loaders(
             settings.batch_size,
             settings.positive_fraction,
             settings.samples_per_epoch,
+            settings.num_workers,
         ),
         evaluation_loader(dataset, settings.batch_size),
     )
@@ -575,10 +576,11 @@ def same(record: EpochRecord) -> str:
     return record_to_json(replace(record, seconds=0.0))
 
 
+@pytest.mark.parametrize("workers", [0, 2])
 def test_a_stopped_run_resumed_equals_a_run_that_was_never_stopped(
-    data: Data, tmp_path: Path
+    data: Data, tmp_path: Path, workers: int
 ) -> None:
-    settings = replace(FAST, epochs=4)
+    settings = replace(FAST, epochs=4, num_workers=workers)
     whole = run_fit(data, settings, tmp_path / "whole")
     first = run_fit(data, settings, tmp_path / "split", time_limit_minutes=1e-9)
     assert first.stop_reason == "time_limit" and len(first.history) == 1
@@ -615,12 +617,11 @@ def test_resuming_a_run_stopped_early_stays_stopped(
     assert again.stop_reason == "early_stopping" and len(again.history) == 3
 
 
-def test_workers_and_mixed_precision_may_change_between_sessions(
+def test_mixed_precision_may_change_between_sessions(
     data: Data, tmp_path: Path
 ) -> None:
     run_fit(data, FAST, tmp_path, time_limit_minutes=1e-9)
-    changed = replace(FAST, amp=True, num_workers=1)
-    result = run_fit(data, changed, tmp_path, resume=True)
+    result = run_fit(data, replace(FAST, amp=True), tmp_path, resume=True)
     assert len(result.history) == 3
 
 
@@ -649,6 +650,8 @@ def test_a_checkpoint_without_training_state_cannot_be_resumed(
         ({"settings": replace(FAST, epochs=5)}, "epochs: 3 -> 5"),
         ({"settings": replace(FAST, learning_rate=1e-2)}, "learning_rate"),
         ({"settings": replace(FAST, selection_metric="with_mass.dice")}, "selection"),
+        # The workers share the samples, so their number changes the draws.
+        ({"settings": replace(FAST, num_workers=1)}, "num_workers"),
         (
             {
                 "model_settings": ModelSettings(
