@@ -253,15 +253,17 @@ def images_frame(manifest: Manifest) -> pd.DataFrame:
     """One row per image, with the number of masses and the positive label.
 
     ``n_masses`` and ``has_mass`` are computed from the ROIs; they are not stored.
+    The view is stored as its value: with pyarrow, pandas turns the enum into a
+    plain string, so it cannot be converted after the frame is built.
     """
     frame = pd.DataFrame(
         [
             {column: getattr(image, column) for column in IMAGE_COLUMNS}
+            | {"view": image.view.value}
             for image in manifest.images
         ],
         columns=pd.Index(IMAGE_COLUMNS),
     )
-    frame["view"] = frame["view"].map(lambda view: view.value)
     frame["acr"] = frame["acr"].astype("Int64")
     return frame
 

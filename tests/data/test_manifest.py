@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 from tests.data.synthetic import write_annotation, write_dicom
@@ -129,6 +130,17 @@ def test_images_frame_has_columns_and_derived_labels(dataset_dir: Path) -> None:
     }
     assert frame.acr.isna().sum() == 1
     assert str(frame.acr.dtype) == "Int64"
+
+
+@pytest.mark.parametrize("storage", ["python", "pyarrow"])
+def test_images_frame_works_with_either_string_storage(
+    dataset_dir: Path, storage: str
+) -> None:
+    # Kaggle has pyarrow, which makes pandas store the views as plain strings.
+    with pd.option_context("mode.string_storage", storage):
+        frame = images_frame(build_manifest(dataset_dir))
+    assert frame.view.tolist() == ["CC", "MLO", "CC", "MLO"]
+    assert all(type(view) is str for view in frame.view)
 
 
 def test_rois_frame_has_one_row_per_roi(dataset_dir: Path) -> None:
