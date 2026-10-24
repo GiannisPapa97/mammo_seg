@@ -31,6 +31,7 @@ from mammo_seg.engine.train import (
     TrainingResult,
     TrainingSettings,
     describe,
+    epoch_seed,
     fit,
     record_to_json,
     selection_value,
@@ -125,6 +126,7 @@ def test_every_group_and_metric_can_be_selected(name: str) -> None:
         {"positive_fraction": 1.0},
         {"samples_per_epoch": 0},
         {"num_workers": -1},
+        {"seed": -1},
         {"unknown": 1},
     ],
 )
@@ -146,6 +148,46 @@ def test_the_batch_size_must_be_the_size_of_the_composition() -> None:
     assert settings.composition == BatchComposition(4, 2, 2)
     with pytest.raises(ValidationError, match="batch size is 4 but the composition"):
         TrainingSettings(batch_size=4, composition=BatchComposition(4, 2, 2))
+
+
+# --- seeding ---
+
+
+def test_an_epoch_seed_is_reproducible_and_fits_torch() -> None:
+    assert epoch_seed(0, 1) == epoch_seed(0, 1)
+    seeds = [epoch_seed(seed, epoch) for seed in range(5) for epoch in range(1, 61)]
+    assert all(0 <= value < 2**64 for value in seeds)
+    torch.Generator().manual_seed(max(seeds))  # torch takes the whole range
+
+
+def test_neighbouring_seeds_do_not_share_epochs() -> None:
+    # With seed + epoch, seed 1 at epoch 1 repeated seed 0 at epoch 2.
+    assert epoch_seed(1, 1) != epoch_seed(0, 2)
+    seeds = [epoch_seed(seed, epoch) for seed in range(10) for epoch in range(1, 61)]
+    assert len(set(seeds)) == len(seeds)
+
+
+def test_a_negative_seed_or_epoch_is_rejected() -> None:
+    with pytest.raises(ValueError, match="must not be negative"):
+        epoch_seed(-1, 1)
+    with pytest.raises(ValueError, match="must not be negative"):
+        epoch_seed(0, -1)
+
+
+def test_every_epoch_is_seeded_from_the_seed_and_the_epoch(
+    data: Data, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[int, int]] = []
+    real = train_module.train_one_epoch
+
+    def recording(model: Any, loader: Any, *args: Any) -> float:
+        seen.append((loader.generator.initial_seed(), torch.initial_seed()))
+        return real(model, loader, *args)
+
+    monkeypatch.setattr(train_module, "train_one_epoch", recording)
+    run_fit(data, replace(FAST, seed=7))
+    expected = [epoch_seed(7, epoch) for epoch in (1, 2, 3)]
+    assert seen == [(seed, seed) for seed in expected]
 
 
 def test_selection_value_reads_the_group_and_the_metric() -> None:

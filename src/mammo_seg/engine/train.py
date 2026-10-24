@@ -29,10 +29,10 @@ schedule, history: all that is needed to continue) and, when the selection metri
 improved, ``best.pt`` (weights only), both atomically (see ``checkpoint.py``).
 ``resume=True`` continues from ``last.pt`` and gives the same result as a run that
 was never interrupted, because the random draws of an epoch depend only on the seed
-and the epoch number. A run stops by itself when the selection metric has not
-improved for ``patience`` epochs, or, before a session is cut off, when another
-epoch would not fit in ``time_limit_minutes``; the last finished epoch is on disk
-either way.
+and the epoch number (see ``epoch_seed``). A run stops by itself when the selection
+metric has not improved for ``patience`` epochs, or, before a session is cut off,
+when another epoch would not fit in ``time_limit_minutes``; the last finished epoch
+is on disk either way.
 """
 
 import json
@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
+import numpy as np
 import torch
 from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic.dataclasses import dataclass as pydantic_dataclass
@@ -103,7 +104,7 @@ class TrainingSettings:
     # Stop when the selection metric has not improved for this many epochs; None
     # always trains for all the epochs.
     patience: Annotated[int, Field(ge=1)] | None = 15
-    seed: int = 0
+    seed: Annotated[int, Field(ge=0)] = 0
     num_workers: Annotated[int, Field(ge=0)] = 0
 
     @field_validator("selection_metric")
@@ -152,6 +153,21 @@ class TrainingResult:
     best_epoch: int | None  # None if the selection metric was never defined
     best_value: float
     stop_reason: StopReason
+
+
+def epoch_seed(seed: int, epoch: int) -> int:
+    """The seed of the random draws of an epoch of a run with ``seed``.
+
+    Both numbers are mixed by NumPy's ``SeedSequence``, so every pair gives its own,
+    unrelated seed. A sum would not: seed 1 at epoch 1 would repeat the draws of
+    seed 0 at epoch 2, and runs with neighbouring seeds would share their batches.
+    Raises ValueError for a negative seed or epoch.
+    """
+    if seed < 0 or epoch < 0:
+        raise ValueError(
+            f"the seed and the epoch must not be negative: {seed}, {epoch}"
+        )
+    return int(np.random.SeedSequence([seed, epoch]).generate_state(1, np.uint64)[0])
 
 
 def selection_value(summary: Summary, name: str) -> float:
@@ -474,9 +490,10 @@ def fit(
         started = time.monotonic()
         # The draws of an epoch depend only on the seed and the epoch, so a resumed
         # run repeats an uninterrupted one.
-        torch.manual_seed(settings.seed + epoch)
+        seed = epoch_seed(settings.seed, epoch)
+        torch.manual_seed(seed)
         if train_loader.generator is not None:
-            train_loader.generator.manual_seed(settings.seed + epoch)
+            train_loader.generator.manual_seed(seed)
         learning_rate = optimizer.param_groups[0]["lr"]
         train_loss = train_one_epoch(
             model, train_loader, loss_function, optimizer, scaler, device, amp
