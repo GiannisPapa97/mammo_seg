@@ -33,6 +33,7 @@ DEFAULT_OUTPUT_DIR = Path("runs")
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
 DEFAULT_MIN_AREAS_MM2 = (0.0, 2.0, 5.0, 10.0)
 ARCHITECTURES = ("unet", "unetplusplus", "deeplabv3", "deeplabv3plus", "fpn")
+INFERENCES = ("whole", "sliding")
 SELECTION_METRICS = tuple(
     f"{group}.{metric}"
     for group in ("with_mass", "without_mass", "all_images")
@@ -139,6 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
         "images without one, for example 4 2 2 (--positive-fraction is then not used)",
     )
     training.add_argument(
+        "--inference",
+        choices=INFERENCES,
+        default=None,
+        help="how validation predicts a whole image: in sliding windows of the crop "
+        "size or in one pass (default: sliding with --crop-size, whole without)",
+    )
+    training.add_argument(
         "--samples-per-epoch",
         type=int,
         default=None,
@@ -216,6 +224,13 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(DEFAULT_MIN_AREAS_MM2),
         help="predicted regions smaller than this many mm² are removed (0: keep all)",
+    )
+    evaluate.add_argument(
+        "--inference",
+        choices=INFERENCES,
+        default=None,
+        help="predict in one pass or in sliding windows "
+        "(default: as each checkpoint was validated in training)",
     )
     evaluate.add_argument("--batch-size", type=int, default=4)
     evaluate.add_argument("--num-workers", type=int, default=0)
@@ -322,6 +337,7 @@ def _train(args: argparse.Namespace) -> int:
                 canvas=canvas_of(record),
                 resume=args.resume,
                 time_limit_minutes=args.max_minutes,
+                inference=args.inference,
             )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)
@@ -375,6 +391,7 @@ def _evaluate(args: argparse.Namespace) -> int:
             device=resolve_device(args.device),
             amp=args.amp,
             canvas=canvas_of(record),
+            inference=args.inference,
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(evaluation_to_dict(evaluation), indent=2) + "\n")

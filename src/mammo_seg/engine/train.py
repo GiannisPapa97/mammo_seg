@@ -13,7 +13,11 @@ a pass of validation:
   mass. Without it, the flat background was left untrained and validation predicted
   masses all over it
 - validation runs on every image of the validation fold once and computes the
-  metrics of ``metrics.py`` for images with a mass, without one, and all images
+  metrics of ``metrics.py`` for images with a mass, without one, and all images. A
+  model trained on crops predicts the whole image in sliding windows of the crop
+  size, one trained on whole images in one pass (``inference.py``), so it sees at
+  validation what it saw in training; ``train_fold`` records which in the
+  checkpoint, for ``evaluate``
 - mixed precision (float16 on the GPU) is used for the network only; the loss is
   computed in float32 and a gradient scaler guards against underflow. It is off on
   the CPU, where it brings nothing
@@ -67,6 +71,7 @@ from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile
 from mammo_seg.device import resolve_device
 from mammo_seg.engine.checkpoint import load_checkpoint, save_checkpoint
+from mammo_seg.engine.inference import Inference, predict
 from mammo_seg.engine.losses import DiceBCELoss
 from mammo_seg.engine.metrics import GroupSummary, Summary, image_scores, summarize
 from mammo_seg.engine.model import ModelSettings, build_model
@@ -234,15 +239,16 @@ def validate(
     loader: DataLoader[Sample],
     device: torch.device,
     amp: bool,
+    inference: Inference = "whole",
+    window: tuple[int, int] | None = None,
 ) -> Summary:
-    """The metrics of the model on every image of the loader."""
+    """The metrics of the model on every image of the loader, predicted in one pass
+    or in sliding windows of ``window`` (see ``inference.predict``)."""
     model.eval()
     scores = []
     for batch in loader:
         images, masks, valid = _to_device(batch, device)
-        with torch.autocast(device.type, enabled=amp):
-            logits = model(images)
-        probabilities = torch.sigmoid(logits.float())
+        probabilities = predict(model, images, inference, window, amp)
         scores.extend(image_scores(probabilities, masks, valid))
     return summarize(scores)
 
@@ -420,8 +426,11 @@ def fit(
     metadata: Mapping[str, Any] | None = None,
     resume: bool = False,
     time_limit_minutes: float | None = None,
+    inference: Inference = "whole",
+    window: tuple[int, int] | None = None,
 ) -> TrainingResult:
-    """Train ``model`` for up to ``settings.epochs`` epochs, validating after each.
+    """Train ``model`` for up to ``settings.epochs`` epochs, validating after each,
+    with the ``inference`` and ``window`` of ``validate``.
 
     The model is moved to ``device``. With an ``output_dir``, ``history.jsonl``,
     ``last.pt`` and ``best.pt`` are written there after every epoch. ``metadata``
@@ -500,7 +509,7 @@ def fit(
             model, train_loader, loss_function, optimizer, scaler, device, amp
         )
         scheduler.step()
-        summary = validate(model, validation_loader, device, amp)
+        summary = validate(model, validation_loader, device, amp, inference, window)
         value = selection_value(summary, settings.selection_metric)
         record = EpochRecord(
             epoch=epoch,
@@ -573,14 +582,18 @@ def train_fold(
     canvas: tuple[int, int] = DEFAULT_CANVAS,
     resume: bool = False,
     time_limit_minutes: float | None = None,
+    inference: Inference | None = None,
 ) -> TrainingResult:
     """Train on every fold but ``fold`` of the splits and validate on ``fold``.
 
     ``device`` defaults to ``resolve_device()``. ``resume`` and
-    ``time_limit_minutes`` are those of ``fit``. Raises ValueError for a fold
-    outside the splits, splits made from another manifest, preprocessed data
-    made with other settings, a composition without crops, or a checkpoint that
-    cannot be resumed.
+    ``time_limit_minutes`` are those of ``fit``. Validation predicts in sliding
+    windows of the training canvas when the training uses crops and in one pass
+    otherwise, unless ``inference`` says otherwise; the choice and the window are
+    stored in the checkpoints, and a run is not resumed with other ones. Raises
+    ValueError for a fold outside the splits, splits made from another manifest,
+    preprocessed data made with other settings, a composition without crops, or a
+    checkpoint that cannot be resumed.
     """
     if settings.composition is not None and augmentation_settings.crop_size is None:
         raise ValueError(
@@ -588,11 +601,14 @@ def train_fold(
         )
     device = device or resolve_device()
     ids = fold_ids(manifest, splits_file, fold)
+    window = _training_canvas(augmentation_settings, canvas)
+    if inference is None:
+        inference = "whole" if augmentation_settings.crop_size is None else "sliding"
     train_data = MammogramDataset(
         preprocessed_dir,
         ids.train,
         preprocessing_settings,
-        _training_canvas(augmentation_settings, canvas),
+        window,
         transform=Augmentation(augmentation_settings),
     )
     validation_data = MammogramDataset(
@@ -614,11 +630,12 @@ def train_fold(
         validation_data, settings.batch_size, settings.num_workers
     )
     logger.info(
-        "fold %d on %s: %d training and %d validation images",
+        "fold %d on %s: %d training and %d validation images, validated %s",
         fold,
         device,
         len(train_data),
         len(validation_data),
+        "in one pass" if inference == "whole" else f"in windows of {window}",
     )
     return fit(
         model,
@@ -632,7 +649,11 @@ def train_fold(
         metadata={
             "fold": fold,
             "augmentation": json.dumps(asdict(augmentation_settings)),
+            "inference": inference,
+            "window": list(window),
         },
         resume=resume,
         time_limit_minutes=time_limit_minutes,
+        inference=inference,
+        window=window,
     )

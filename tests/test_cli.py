@@ -14,6 +14,7 @@ from mammo_seg.data.splits import create_splits_file, write_splits
 from mammo_seg.engine import evaluate as evaluate_module
 from mammo_seg.engine import train as train_module
 from mammo_seg.engine.checkpoint import save_checkpoint
+from mammo_seg.engine.inference import INFERENCES
 from mammo_seg.engine.model import Architecture, ModelSettings, build_model
 from mammo_seg.engine.train import SELECTION_METRICS, TrainingResult
 
@@ -43,6 +44,7 @@ def test_the_choices_are_those_of_the_engine() -> None:
     assert cli.DEFAULT_THRESHOLDS == evaluate_module.DEFAULT_THRESHOLDS
     assert cli.DEFAULT_MIN_AREAS_MM2 == evaluate_module.DEFAULT_MIN_AREAS_MM2
     assert cli.ARCHITECTURES == get_args(Architecture)
+    assert cli.INFERENCES == INFERENCES
 
 
 def test_the_defaults_are_the_agreed_training_settings() -> None:
@@ -169,6 +171,7 @@ def test_the_options_become_settings(
     assert preprocessing == SETTINGS and crops.crop_size is None
     assert kwargs["output_dir"] == project.output / "fold_1"
     assert kwargs["canvas"] == (64, 64)
+    assert kwargs["inference"] is None  # follows the crops
     assert kwargs["resume"] and kwargs["time_limit_minutes"] == 90
     assert kwargs["device"].type == "cpu"
     assert "Training ended after 0 epochs (finished)" in capsys.readouterr().out
@@ -379,11 +382,38 @@ def save_runs(project: Project, folds: tuple[int, ...] = (0, 1)) -> None:
         )
 
 
+def test_the_inference_of_a_training_can_be_chosen(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake(*args: Any, **kwargs: Any) -> TrainingResult:
+        calls.append(kwargs)
+        return result()
+
+    monkeypatch.setattr(train_module, "train_fold", fake)
+    options = ["--crop-size", "32", "--inference", "whole", *TINY]
+    assert cli.main(project.train_args(*options)) == 0
+    assert calls[0]["inference"] == "whole"
+
+
+def test_evaluate_can_choose_the_inference(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    save_runs(project)  # checkpoints that record no window
+    folds = ["--folds", "0", "1"]
+    assert cli.main(evaluate_args(project, *folds, "--inference", "sliding")) == 1
+    assert "records no window size" in capsys.readouterr().err
+    assert cli.main(evaluate_args(project, *folds, "--inference", "whole")) == 0
+    assert "predicted in one pass" in capsys.readouterr().out
+
+
 def test_the_evaluate_defaults_cover_the_five_folds() -> None:
     args = cli.build_parser().parse_args(["evaluate"])
     assert args.folds == [0, 1, 2, 3, 4] and args.checkpoint_name == "last.pt"
     assert args.thresholds == list(cli.DEFAULT_THRESHOLDS)
     assert args.min_areas_mm2 == list(cli.DEFAULT_MIN_AREAS_MM2)
+    assert args.inference is None
     assert not args.test and args.output is None and args.runs_dir == Path("runs")
 
 
