@@ -19,6 +19,14 @@ as a miss and a false region, and the found masses against the false regions per
 image, over the thresholds, make a curve like an FROC. Two masses that touch are one
 region of the mask and count as one mass (in INbreast, 116 masses give 115 regions).
 
+Every summary also breaks the scores down by **subgroup**, with the thresholds of
+the splits (``strata.py``): images without a mass by kind (normal, BI-RADS 1; a
+benign finding, BI-RADS 2 or 3; a suspicious finding that is not a mass, BI-RADS 4a
+to 6), masses by size (smaller than 100 mm² or not), and images by breast density
+(fatty, ACR 1 or 2; dense, ACR 3 or 4; the one image without a density is in
+neither). Images without a mass are not equally hard, so a set's false alarms depend
+on its mix; the subgroups make sets with different mixes comparable.
+
 Scoring a validation fold with the model that did not train on it, for every fold,
 gives out-of-fold predictions for all development images; the results of the folds
 are pooled by concatenating the per-image scores. Choosing a setting on these
@@ -53,7 +61,11 @@ from mammo_seg.data.preprocess_dataset import (
 from mammo_seg.data.preprocessing import PreprocessingSettings, PreprocessParams
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile, fold_name
-from mammo_seg.data.strata import INBREAST_PIXEL_SIZE_MM
+from mammo_seg.data.strata import (
+    DEFAULT_DENSE_ACR,
+    DEFAULT_SMALL_MASS_MM2,
+    INBREAST_PIXEL_SIZE_MM,
+)
 from mammo_seg.device import resolve_device
 from mammo_seg.engine.checkpoint import load_checkpoint, model_from_checkpoint
 from mammo_seg.engine.metrics import ImageScores, Summary, image_scores, summarize
@@ -101,6 +113,8 @@ class ImageInfo:
     """What the scoring needs to know about an image besides its tensors."""
 
     pixel_area_mm2: float  # the area of one preprocessed pixel
+    birads: str  # the BI-RADS category of the image, for example "4a"
+    acr: int | None  # the ACR breast density, 1 to 4; None if unknown
 
 
 def pixel_area_mm2(
@@ -112,11 +126,17 @@ def pixel_area_mm2(
 
 
 def image_infos(
-    record: PreprocessingRecord, file_ids: Sequence[str]
+    record: PreprocessingRecord, manifest: Manifest, file_ids: Sequence[str]
 ) -> dict[str, ImageInfo]:
-    """The ``ImageInfo`` of every image of ``file_ids``, from the preprocessing."""
+    """The ``ImageInfo`` of every image of ``file_ids``, from the preprocessing and
+    the manifest."""
+    images = {image.file_id: image for image in manifest.images}
     return {
-        file_id: ImageInfo(pixel_area_mm2(record.images[file_id]))
+        file_id: ImageInfo(
+            pixel_area_mm2(record.images[file_id]),
+            images[file_id].birads,
+            images[file_id].acr,
+        )
         for file_id in file_ids
     }
 
@@ -173,6 +193,7 @@ class ImageResult:
     predicted_pixels: int  # on the valid pixels, after post-processing
     masses: tuple[MassResult, ...]
     false_regions: int  # predicted regions that found no mass
+    info: ImageInfo
 
 
 def score_batch(
@@ -212,8 +233,91 @@ def score_batch(
         masses, false_regions = match_lesions(
             cleaned[index, 0].numpy(), truth[index, 0].numpy(), info.pixel_area_mm2
         )
-        results.append(ImageResult(score, int(count), masses, false_regions))
+        results.append(ImageResult(score, int(count), masses, false_regions, info))
     return results
+
+
+# The kinds of images without a mass, by BI-RADS category.
+NEGATIVE_KINDS = {
+    "normal": ("1",),
+    "benign": ("2", "3"),
+    "suspicious": ("4a", "4b", "4c", "5", "6"),
+}
+
+
+@dataclass(frozen=True)
+class NegativeGroup:
+    """Images without a mass of one kind."""
+
+    images: int
+    false_alarm_rate: float  # NaN without images
+    false_regions_per_image: float  # NaN without images
+
+
+@dataclass(frozen=True)
+class MassGroup:
+    """Masses of one size."""
+
+    masses: int
+    found_masses: float  # the share found; NaN without masses
+
+
+@dataclass(frozen=True)
+class DensityGroup:
+    """Images of one breast density."""
+
+    images_with_mass: int
+    dice_with_mass: float  # NaN without images with a mass
+    images_without_mass: int
+    false_alarm_rate: float  # NaN without images without a mass
+
+
+@dataclass(frozen=True)
+class Subgroups:
+    negatives: dict[str, NegativeGroup]  # "normal", "benign", "suspicious"
+    masses: dict[str, MassGroup]  # "small", "large"
+    density: dict[str, DensityGroup]  # "fatty", "dense"
+
+
+def subgroups_of(results: Sequence[ImageResult]) -> Subgroups:
+    """The scores of ``results`` by subgroup (see the module docstring)."""
+    negatives = [r for r in results if not r.scores.has_mass]
+    masses = [mass for r in results for mass in r.masses]
+
+    def density(dense: bool) -> DensityGroup:
+        group = [
+            r
+            for r in results
+            if r.info.acr is not None and (r.info.acr >= DEFAULT_DENSE_ACR) == dense
+        ]
+        with_mass = [r for r in group if r.scores.has_mass]
+        without = [r for r in group if not r.scores.has_mass]
+        return DensityGroup(
+            images_with_mass=len(with_mass),
+            dice_with_mass=_mean([r.scores.dice for r in with_mass]),
+            images_without_mass=len(without),
+            false_alarm_rate=_mean([float(r.scores.predicted) for r in without]),
+        )
+
+    def kind(categories: tuple[str, ...]) -> NegativeGroup:
+        group = [r for r in negatives if r.info.birads in categories]
+        return NegativeGroup(
+            images=len(group),
+            false_alarm_rate=_mean([float(r.scores.predicted) for r in group]),
+            false_regions_per_image=_mean([r.false_regions for r in group]),
+        )
+
+    def size(small: bool) -> MassGroup:
+        group = [m for m in masses if (m.area_mm2 < DEFAULT_SMALL_MASS_MM2) == small]
+        return MassGroup(len(group), _mean([float(m.found) for m in group]))
+
+    return Subgroups(
+        negatives={
+            name: kind(categories) for name, categories in NEGATIVE_KINDS.items()
+        },
+        masses={"small": size(True), "large": size(False)},
+        density={"fatty": density(False), "dense": density(True)},
+    )
 
 
 @dataclass(frozen=True)
@@ -232,6 +336,7 @@ class SettingResult:
     found_masses: float
     # The mean number of false regions per image, over all images; NaN without any.
     false_regions_per_image: float
+    subgroups: Subgroups
 
 
 def summarize_results(
@@ -248,6 +353,7 @@ def summarize_results(
         masses=len(masses),
         found_masses=_mean([float(mass.found) for mass in masses]),
         false_regions_per_image=_mean([r.false_regions for r in results]),
+        subgroups=subgroups_of(results),
     )
 
 
@@ -378,7 +484,7 @@ def evaluate_folds(
             evaluation_loader(dataset, batch_size, num_workers),
             settings,
             device,
-            image_infos(record, ids),
+            image_infos(record, manifest, ids),
             amp,
         )
         per_fold[fold] = _fold_evaluation(results)
@@ -469,4 +575,33 @@ def format_evaluation(evaluation: Evaluation) -> str:
     for fold, evaluated in evaluation.per_fold.items():
         chosen = next(r for r in evaluated.settings if r.setting == best.setting)
         lines.append(_row(f"{'fold ' + str(fold):>18} ", chosen))
+    lines += ["", "by subgroup, all folds pooled, at the same setting:"]
+    lines += _subgroup_lines(best.subgroups)
     return "\n".join(lines)
+
+
+def _subgroup_lines(groups: Subgroups) -> list[str]:
+    lines = []
+    for name, negative in groups.negatives.items():
+        lines.append(
+            f"  without a mass, {name + ':':<11} {negative.images:>3} images, "
+            f"false alarms {_show(negative.false_alarm_rate)}, "
+            f"false regions per image {_show(negative.false_regions_per_image, 2)}"
+        )
+    small, large = groups.masses["small"], groups.masses["large"]
+    limit = f"{DEFAULT_SMALL_MASS_MM2:g} mm²"
+    lines.append(
+        f"  masses under {limit}: {small.masses:>3}, found {_show(small.found_masses)}"
+    )
+    lines.append(
+        f"  masses of {limit} or more: {large.masses:>3}, "
+        f"found {_show(large.found_masses)}"
+    )
+    for name, density in groups.density.items():
+        lines.append(
+            f"  {name} breasts: {density.images_with_mass:>3} images with a mass, "
+            f"Dice {_show(density.dice_with_mass)}; "
+            f"{density.images_without_mass:>3} without, "
+            f"false alarms {_show(density.false_alarm_rate)}"
+        )
+    return lines

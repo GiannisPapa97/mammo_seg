@@ -27,6 +27,7 @@ from mammo_seg.engine.evaluate import (
     Evaluation,
     FoldEvaluation,
     ImageInfo,
+    ImageResult,
     PostProcessing,
     SettingResult,
     best_setting,
@@ -40,6 +41,7 @@ from mammo_seg.engine.evaluate import (
     remove_small_regions,
     score_batch,
     settings_grid,
+    subgroups_of,
     summarize_results,
 )
 from mammo_seg.engine.model import ModelSettings, build_model
@@ -47,7 +49,8 @@ from mammo_seg.engine.model import ModelSettings, build_model
 CANVAS = (64, 64)
 CPU = torch.device("cpu")
 TINY = ModelSettings(encoder="tu-mobilenetv3_small_050", encoder_weights=None)
-ONE_MM2 = ImageInfo(pixel_area_mm2=1.0)  # pixels and mm² are the same
+# Pixels and mm² are the same; a benign finding (BI-RADS 2) in a fatty breast.
+ONE_MM2 = ImageInfo(pixel_area_mm2=1.0, birads="2", acr=2)
 
 # --- post-processing settings and small regions ---
 
@@ -264,7 +267,9 @@ def test_a_batch_is_scored_per_lesion_on_the_valid_pixels() -> None:
 
 def test_the_same_area_in_mm2_removes_more_pixels_on_a_finer_image() -> None:
     # The 2 pixel spot is 2 mm² at 1 mm² per pixel, but 8 mm² at 4 mm² per pixel.
-    coarse = score_batch(*batch(False), PostProcessing(0.5, 5), [ImageInfo(4.0)])[0]
+    coarse = score_batch(
+        *batch(False), PostProcessing(0.5, 5), [ImageInfo(4.0, "2", 2)]
+    )[0]
     fine = score_batch(*batch(False), PostProcessing(0.5, 5), [ONE_MM2])[0]
     assert coarse.scores.predicted and not fine.scores.predicted
 
@@ -307,6 +312,64 @@ def test_without_images_of_one_kind_the_balanced_dice_is_undefined() -> None:
     assert math.isnan(nothing.false_regions_per_image)
 
 
+# --- subgroups ---
+
+
+def scored(mass: bool, setting: PostProcessing, info: ImageInfo) -> ImageResult:
+    (result,) = score_batch(*batch(mass), setting, [info])
+    return result
+
+
+def test_images_without_a_mass_are_grouped_by_kind() -> None:
+    alarm, quiet = PostProcessing(0.5, 0), PostProcessing(0.5, 3)  # the spot or not
+    results = [
+        scored(False, alarm, ImageInfo(1.0, "1", 1)),  # normal, a false alarm
+        scored(False, quiet, ImageInfo(1.0, "1", 1)),  # normal
+        scored(False, quiet, ImageInfo(1.0, "3", 2)),  # benign
+        scored(True, alarm, ImageInfo(1.0, "5", 2)),  # has a mass: in no kind
+    ]
+    negatives = subgroups_of(results).negatives
+    assert negatives["normal"].images == 2
+    assert negatives["normal"].false_alarm_rate == 0.5
+    assert negatives["normal"].false_regions_per_image == 0.5
+    assert negatives["benign"].images == 1 and negatives["benign"].false_alarm_rate == 0
+    assert negatives["suspicious"].images == 0
+    assert math.isnan(negatives["suspicious"].false_alarm_rate)
+
+
+def test_masses_are_grouped_by_their_area_in_mm2() -> None:
+    # The 16 pixel mass is 16 mm² at 1 mm² per pixel, 160 mm² at 10 mm² per pixel.
+    results = [
+        scored(True, PostProcessing(0.5, 0), ONE_MM2),  # found
+        scored(True, PostProcessing(0.95, 0), ImageInfo(10.0, "4a", 3)),  # missed
+    ]
+    masses = subgroups_of(results).masses
+    assert (masses["small"].masses, masses["small"].found_masses) == (1, 1.0)
+    assert (masses["large"].masses, masses["large"].found_masses) == (1, 0.0)
+
+
+def test_images_are_grouped_by_density() -> None:
+    results = [
+        scored(True, PostProcessing(0.5, 0), ImageInfo(1.0, "5", 4)),  # dense
+        scored(False, PostProcessing(0.5, 0), ImageInfo(1.0, "2", 3)),  # dense, alarm
+        scored(False, PostProcessing(0.5, 0), ImageInfo(1.0, "2", 1)),  # fatty, alarm
+        scored(False, PostProcessing(0.5, 0), ImageInfo(1.0, "2", None)),  # neither
+    ]
+    density = subgroups_of(results).density
+    dense, fatty = density["dense"], density["fatty"]
+    assert (dense.images_with_mass, dense.images_without_mass) == (1, 1)
+    assert dense.dice_with_mass == pytest.approx(2 * 8 / (2 * 8 + 2 + 8))
+    assert dense.false_alarm_rate == 1.0
+    assert (fatty.images_with_mass, fatty.images_without_mass) == (0, 1)
+    assert math.isnan(fatty.dice_with_mass)
+
+
+def test_the_summary_of_a_setting_holds_its_subgroups() -> None:
+    results = [scored(True, PostProcessing(0.5, 0), ONE_MM2)]
+    summary = summarize_results(PostProcessing(0.5, 0), results)
+    assert summary.subgroups == subgroups_of(results)
+
+
 # --- a model over a loader ---
 
 
@@ -336,7 +399,8 @@ def test_a_model_is_scored_under_every_setting_and_against_predicting_nothing(
     # A pixel is 6.25 x 5 native pixels of 0.07 mm, 0.153 mm²: the strip is 9.8 mm²
     # and a mass 15.3 mm², so a minimum of 12 mm² removes the strip only.
     settings = [PostProcessing(0.5, 0), PostProcessing(0.5, 12)]
-    infos = image_infos(read_record(tmp_path / "preprocessed" / RECORD_FILE), ids)
+    record = read_record(tmp_path / "preprocessed" / RECORD_FILE)
+    infos = image_infos(record, manifest, ids)
     results = evaluate_model(
         BrightPixels(), evaluation_loader(dataset, 3), settings, CPU, infos
     )
@@ -505,7 +569,14 @@ def sweep() -> FoldEvaluation:
     def result(threshold: float, dice: float, other: float) -> SettingResult:
         base = summarize_results(PostProcessing(threshold), [])
         return SettingResult(
-            base.setting, base.summary, 0.0, dice + other, 0, math.nan, math.nan
+            base.setting,
+            base.summary,
+            0.0,
+            dice + other,
+            0,
+            math.nan,
+            math.nan,
+            base.subgroups,
         )
 
     return FoldEvaluation(
@@ -543,6 +614,8 @@ def test_the_results_become_json_with_none_for_undefined_values(
     assert content["pooled"]["baseline"]["summary"]["with_mass"]["sensitivity"] == 0.0
     assert content["pooled"]["baseline"]["found_masses"] == 0.0
     assert pooled["masses"] == 4
+    assert set(pooled["subgroups"]) == {"negatives", "masses", "density"}
+    assert set(pooled["subgroups"]["negatives"]) == {"normal", "benign", "suspicious"}
 
 
 def test_the_text_shows_the_sweep_the_baseline_and_the_folds(
@@ -551,5 +624,7 @@ def test_the_text_shows_the_sweep_the_baseline_and_the_folds(
     text = format_evaluation(evaluate(tmp_path, manifest))
     assert "last.pt on the validation images (16 scored, 2 fold(s) pooled)" in text
     assert "predict nothing" in text and "fold 0" in text and "fold 1" in text
+    assert "by subgroup" in text and "without a mass, normal:" in text
+    assert "masses under 100 mm²" in text and "dense breasts" in text
     assert text.count("*") == 1  # the best setting is marked once
     assert len({len(line) for line in text.splitlines() if " | " in line}) == 1
