@@ -33,7 +33,9 @@ windows of its training canvas if it was trained on crops, in one pass otherwise
 
 The evaluation also keeps every image with its results under every setting
 (``Evaluation.images``): its fold, its identity, its scores, each of its masses (area,
-found or not, best IoU, centre) and each false region (area, centre).
+found or not, best IoU, centre, highest probability inside it) and each false region
+(area, centre, highest probability). The highest probability inside a missed mass
+shows whether the model half saw it or did not respond to it at all.
 ``details_to_dict`` turns them into plain values, for an analysis of the errors.
 
 Scoring a validation fold with the model that did not train on it, for every fold,
@@ -179,6 +181,9 @@ class MassResult:
     iou: float  # the best IoU of a predicted region with it; 0 if none overlaps
     row: float  # its centre, in pixels of the preprocessed image
     col: float
+    # The highest predicted probability inside it, whatever the threshold: how
+    # close a missed mass came to being found.
+    peak: float
 
 
 @dataclass(frozen=True)
@@ -188,6 +193,7 @@ class FalseRegion:
     area_mm2: float
     row: float  # its centre, in pixels of the preprocessed image
     col: float
+    peak: float  # the highest predicted probability inside it
 
 
 def _centres(labels: npt.NDArray[np.int32], count: int) -> npt.NDArray[np.float64]:
@@ -205,13 +211,35 @@ def _centres(labels: npt.NDArray[np.int32], count: int) -> npt.NDArray[np.float6
     )
 
 
+def _peaks(
+    probabilities: npt.NDArray[np.floating[Any]],
+    labels: npt.NDArray[np.int32],
+    count: int,
+) -> npt.NDArray[np.float64]:
+    """The highest probability in each of the labelled regions 1..count."""
+    if count == 0:
+        return np.zeros(0)
+    peaks = ndimage.maximum(probabilities, labels, np.arange(1, count + 1))
+    return np.asarray(peaks, dtype=np.float64)
+
+
 def match_lesions(
     predicted: npt.NDArray[np.bool_],
     truth: npt.NDArray[np.bool_],
     pixel_area_mm2: float,
+    probabilities: npt.NDArray[np.floating[Any]],
 ) -> tuple[tuple[MassResult, ...], tuple[FalseRegion, ...]]:
     """The masses of a ``[H, W]`` mask, each found or not, and the false regions of
-    a ``[H, W]`` prediction (see the module docstring)."""
+    a ``[H, W]`` prediction (see the module docstring), with the highest of the
+    ``[H, W]`` ``probabilities`` inside each.
+
+    Raises ValueError if the probabilities do not have the shape of the mask.
+    """
+    if probabilities.shape != truth.shape:
+        raise ValueError(
+            f"probabilities of shape {probabilities.shape} for a mask of shape "
+            f"{truth.shape}"
+        )
     masses, n_masses = ndimage.label(truth, structure=_EIGHT_CONNECTED)
     regions, n_regions = ndimage.label(predicted, structure=_EIGHT_CONNECTED)
     mass_sizes = np.bincount(masses.ravel(), minlength=n_masses + 1)[1:]
@@ -230,16 +258,30 @@ def match_lesions(
     )
     found = tuple(
         MassResult(
-            float(size * pixel_area_mm2), bool(hit), float(score), float(r), float(c)
+            float(size * pixel_area_mm2),
+            bool(hit),
+            float(score),
+            float(r),
+            float(c),
+            float(peak),
         )
-        for size, hit, score, (r, c) in zip(
-            mass_sizes, hits.any(axis=1), best, mass_centres, strict=True
+        for size, hit, score, (r, c), peak in zip(
+            mass_sizes,
+            hits.any(axis=1),
+            best,
+            mass_centres,
+            _peaks(probabilities, masses, n_masses),
+            strict=True,
         )
     )
     false = tuple(
-        FalseRegion(float(size * pixel_area_mm2), float(r), float(c))
-        for size, matched, (r, c) in zip(
-            region_sizes, hits.any(axis=0), region_centres, strict=True
+        FalseRegion(float(size * pixel_area_mm2), float(r), float(c), float(peak))
+        for size, matched, (r, c), peak in zip(
+            region_sizes,
+            hits.any(axis=0),
+            region_centres,
+            _peaks(probabilities, regions, n_regions),
+            strict=True,
         )
         if not matched
     )
@@ -290,7 +332,10 @@ def score_batch(
         zip(scores, pixels, infos, strict=True)
     ):
         masses, false_regions = match_lesions(
-            cleaned[index, 0].numpy(), truth[index, 0].numpy(), info.pixel_area_mm2
+            cleaned[index, 0].numpy(),
+            truth[index, 0].numpy(),
+            info.pixel_area_mm2,
+            probabilities[index, 0].numpy(),
         )
         results.append(ImageResult(score, int(count), masses, false_regions, info))
     return results
