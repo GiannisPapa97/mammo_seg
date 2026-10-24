@@ -14,7 +14,12 @@ the augmentation (``AugmentationSettings.crop_size``).
 
 Everything random is driven by one seeded ``torch.Generator``, so a run can be
 repeated. The augmentation uses PyTorch's random numbers, and the loader seeds
-every worker from that generator.
+every worker from that generator. Workers are started again for every epoch rather
+than kept (no persistent workers): a kept worker goes on with the random state it
+started with, so reseeding the generator before an epoch would not reach it, and a
+run resumed at a later epoch would draw other samples than one that never stopped.
+The draws still depend on the number of workers, which share the samples between
+them.
 """
 
 from collections.abc import Iterator, Sequence
@@ -199,7 +204,6 @@ def training_loader(
             generator=generator,
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
-            persistent_workers=num_workers > 0,
         )
     sampler = None
     if positive_fraction is not None:
@@ -218,7 +222,6 @@ def training_loader(
         num_workers=num_workers,
         drop_last=True,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
     )
 
 

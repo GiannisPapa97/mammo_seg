@@ -147,6 +147,48 @@ def test_the_training_loader_works_with_workers(
     assert len(drawn_ids(loader)) == 4
 
 
+def epoch_of(
+    loader: torch.utils.data.DataLoader,  # type: ignore[type-arg]
+    seed: int,
+) -> list[tuple[tuple[str, ...], float]]:
+    """One epoch, after reseeding as the training loop does before every epoch."""
+    torch.manual_seed(seed)
+    assert loader.generator is not None
+    loader.generator.manual_seed(seed)
+    return [(tuple(batch["file_id"]), float(batch["image"].sum())) for batch in loader]
+
+
+@pytest.mark.parametrize("workers", [0, 2])
+@pytest.mark.parametrize("composition", [None, BatchComposition(1, 1, 0)])
+def test_an_epoch_depends_only_on_its_seed_with_or_without_workers(
+    tmp_path: Path,
+    manifest: Manifest,
+    workers: int,
+    composition: BatchComposition | None,
+) -> None:
+    # A resumed run starts a new loader at a later epoch; it must draw what the
+    # loader of an uninterrupted run draws at that epoch, augmentation included.
+    write_preprocessed(tmp_path, SETTINGS)
+    crops = Augmentation(AugmentationSettings(crop_size=(32, 24)))
+    dataset = MammogramDataset(tmp_path, IDS, SETTINGS, (32, 32), transform=crops)
+
+    def loader() -> torch.utils.data.DataLoader:  # type: ignore[type-arg]
+        return training_loader(
+            dataset,
+            manifest,
+            2,
+            samples_per_epoch=8,
+            num_workers=workers,
+            composition=composition,
+        )
+
+    uninterrupted = loader()
+    first = epoch_of(uninterrupted, 1)
+    second = epoch_of(uninterrupted, 2)
+    assert first != second
+    assert epoch_of(loader(), 2) == second
+
+
 def test_the_evaluation_loader_uses_every_image_once_in_order(
     dataset: MammogramDataset,
 ) -> None:
