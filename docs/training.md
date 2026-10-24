@@ -131,7 +131,12 @@ Both are written atomically (section 3).
 
 A run stops when the epochs are done, when the selection metric has not improved for `patience` epochs, or, with `--max-minutes`, before an epoch that would not end within that time, so a session with a time limit ends with a saved state instead of a lost epoch. At least one epoch always runs, so repeated sessions make progress.
 
-`--resume` continues from `last.pt`. It refuses a checkpoint made with other training settings, model, preprocessing or fold (only the number of workers and mixed precision may differ), so a run is never continued with something else than it started with. The random draws of an epoch (the sampler and the augmentation) depend only on the seed and the epoch number, so a stopped and resumed run gives the same history and weights as one that was never stopped; a test checks this on the CPU.
+`--resume` continues from `last.pt`. It refuses a checkpoint made with other training settings, model, preprocessing or fold (only mixed precision may differ), so a run is never continued with something else than it started with. The number of workers must stay the same too: the workers share the samples of an epoch, so their number changes the random draws.
+
+The random draws of an epoch (the sampler and the augmentation) depend only on the seed, the epoch number and the number of workers, so a stopped and resumed run gives the same history and weights as one that was never stopped; tests check this on the CPU with no workers and with two. Two things make it hold:
+
+- **Every epoch has its own seed**, mixed from the run's seed and the epoch number by NumPy's `SeedSequence` (`epoch_seed`). It seeds PyTorch and the loader's generator before the epoch. An earlier version used the sum of the two, so a run with seed 1 drew at epoch 1 exactly what a run with seed 0 drew at epoch 2: runs with neighbouring seeds shared their batches and looked more alike than independent runs.
+- **The data loader workers are started again for every epoch**, not kept between epochs. A kept worker goes on with the random state it started with, so reseeding before an epoch did not reach it. With `--num-workers 2`, as on Kaggle, a resumed run then drew other images and other augmentations than one that never stopped, so the earlier runs that went on in a later session cannot be repeated exactly. Restarting the workers costs a moment per epoch.
 
 ## 5. Running it
 
