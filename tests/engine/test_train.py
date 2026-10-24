@@ -693,7 +693,81 @@ def test_a_fold_trains_on_the_other_folds_and_validates_on_its_own(
         )
     assert len(result.history) == 1
     assert result.history[0].validation.all_images.images == 8
-    assert "fold 1 on cpu: 8 training and 8 validation images" in caplog.messages
+    assert (
+        "fold 1 on cpu: 8 training and 8 validation images, validated in one pass"
+        in caplog.messages
+    )
+
+
+class Bright(torch.nn.Module):
+    """A pixel-wise model: a mass wherever the image is bright, confidently."""
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return (images > 0.5).float() * 20 - 10
+
+
+def test_validation_can_predict_in_sliding_windows(data: Data) -> None:
+    _, validation_loader = loaders(data)
+    whole = validate(Bright(), validation_loader, CPU, amp=False)
+    sliding = validate(Bright(), validation_loader, CPU, False, "sliding", (32, 32))
+    assert sliding == whole  # the same for a pixel-wise model
+
+
+def fold_metadata(
+    data: Data, output: Path, augmentation: AugmentationSettings, **options: Any
+) -> dict[str, Any]:
+    train_fold(
+        data.manifest,
+        data.splits_file,
+        data.directory,
+        fold=0,
+        settings=replace(FAST, epochs=1),
+        model_settings=TINY,
+        preprocessing_settings=SETTINGS,
+        augmentation_settings=augmentation,
+        device=CPU,
+        canvas=CANVAS,
+        output_dir=output,
+        **options,
+    )
+    return load_checkpoint(output / LAST_FILE).metadata
+
+
+def test_a_fold_on_crops_validates_in_sliding_windows_of_its_canvas(
+    data: Data, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[Any, ...]] = []
+    real = train_module.validate
+
+    def spy(*args: Any) -> Any:
+        seen.append(args[4:])
+        return real(*args)
+
+    monkeypatch.setattr(train_module, "validate", spy)
+    metadata = fold_metadata(data, tmp_path / "crops", CROPS)
+    assert seen == [("sliding", (32, 32))]
+    assert metadata["inference"] == "sliding" and metadata["window"] == [32, 32]
+
+
+def test_a_fold_on_whole_images_validates_in_one_pass(
+    data: Data, tmp_path: Path
+) -> None:
+    metadata = fold_metadata(data, tmp_path / "whole", AugmentationSettings())
+    assert metadata["inference"] == "whole" and metadata["window"] == [64, 64]
+
+
+def test_the_inference_of_a_fold_can_be_chosen(data: Data, tmp_path: Path) -> None:
+    metadata = fold_metadata(data, tmp_path / "mixed", CROPS, inference="whole")
+    assert metadata["inference"] == "whole"  # crops, validated in one pass
+
+
+def test_a_run_is_not_resumed_with_another_inference(
+    data: Data, tmp_path: Path
+) -> None:
+    output = tmp_path / "run"
+    fold_metadata(data, output, CROPS, time_limit_minutes=1e-9)
+    with pytest.raises(ValueError, match="inference"):
+        fold_metadata(data, output, CROPS, resume=True, inference="whole")
 
 
 def test_a_fold_is_repeatable_with_the_same_seed(data: Data) -> None:

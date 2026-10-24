@@ -1,6 +1,7 @@
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -44,6 +45,7 @@ from mammo_seg.engine.evaluate import (
     subgroups_of,
     summarize_results,
 )
+from mammo_seg.engine.inference import predict
 from mammo_seg.engine.model import ModelSettings, build_model
 
 CANVAS = (64, 64)
@@ -429,7 +431,7 @@ def test_a_model_is_scored_under_every_setting_and_against_predicting_nothing(
 
 
 def make_runs(
-    root: Path, folds: tuple[int, ...] = (0, 1), name: str = "last.pt", **metadata: int
+    root: Path, folds: tuple[int, ...] = (0, 1), name: str = "last.pt", **metadata: Any
 ) -> Path:
     runs = root / "runs"
     for fold in folds:
@@ -562,6 +564,41 @@ def test_the_test_set_is_scored_instead_of_the_validation_folds(
     assert validation.per_fold[0].images == 6  # the other images are in the test set
 
 
+# --- how the models predict ---
+
+
+def test_a_checkpoint_without_an_inference_predicts_in_one_pass(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    assert evaluate(tmp_path, manifest).inference == {0: "whole", 1: "whole"}
+
+
+def test_a_model_predicts_as_its_checkpoint_records(
+    tmp_path: Path, manifest: Manifest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[Any, ...]] = []
+
+    def spy(*args: Any) -> torch.Tensor:
+        seen.append(args[2:4])
+        return predict(*args)
+
+    monkeypatch.setattr("mammo_seg.engine.evaluate.predict", spy)
+    runs = make_runs(tmp_path, inference="sliding", window=[32, 32])
+    evaluation = evaluate(tmp_path, manifest, runs_dir=runs)
+    assert evaluation.inference == {0: "sliding", 1: "sliding"}
+    assert set(seen) == {("sliding", (32, 32))}
+    assert "predicted in sliding windows" in format_evaluation(evaluation)
+    whole = evaluate(tmp_path, manifest, runs_dir=runs, inference="whole")
+    assert whole.inference == {0: "whole", 1: "whole"}
+
+
+def test_sliding_windows_need_a_recorded_window(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    with pytest.raises(ValueError, match="records no window size"):
+        evaluate(tmp_path, manifest, inference="sliding")
+
+
 # --- reporting ---
 
 
@@ -622,7 +659,10 @@ def test_the_text_shows_the_sweep_the_baseline_and_the_folds(
     tmp_path: Path, manifest: Manifest
 ) -> None:
     text = format_evaluation(evaluate(tmp_path, manifest))
-    assert "last.pt on the validation images (16 scored, 2 fold(s) pooled)" in text
+    assert (
+        "last.pt on the validation images (16 scored, 2 fold(s) pooled), "
+        "predicted in one pass"
+    ) in text
     assert "predict nothing" in text and "fold 0" in text and "fold 1" in text
     assert "by subgroup" in text and "without a mass, normal:" in text
     assert "masses under 100 mm²" in text and "dense breasts" in text

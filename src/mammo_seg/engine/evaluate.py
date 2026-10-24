@@ -27,6 +27,10 @@ to 6), masses by size (smaller than 100 mm² or not), and images by breast densi
 neither). Images without a mass are not equally hard, so a set's false alarms depend
 on its mix; the subgroups make sets with different mixes comparable.
 
+Each model predicts the whole image as it was validated in training: in sliding
+windows of its training canvas if it was trained on crops, in one pass otherwise
+(the checkpoint records which; ``inference`` overrides it).
+
 Scoring a validation fold with the model that did not train on it, for every fold,
 gives out-of-fold predictions for all development images; the results of the folds
 are pooled by concatenating the per-image scores. Choosing a setting on these
@@ -68,6 +72,7 @@ from mammo_seg.data.strata import (
 )
 from mammo_seg.device import resolve_device
 from mammo_seg.engine.checkpoint import load_checkpoint, model_from_checkpoint
+from mammo_seg.engine.inference import Inference, predict
 from mammo_seg.engine.metrics import ImageScores, Summary, image_scores, summarize
 
 DEFAULT_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
@@ -377,16 +382,18 @@ def evaluate_model(
     device: torch.device,
     infos: Mapping[str, ImageInfo],
     amp: bool = False,
+    inference: Inference = "whole",
+    window: tuple[int, int] | None = None,
 ) -> ModelResults:
     """Predict every image of the loader once and score it under every setting;
-    ``infos`` holds the ``ImageInfo`` of every image, by file id."""
+    ``infos`` holds the ``ImageInfo`` of every image, by file id. ``inference`` and
+    ``window`` are those of ``inference.predict``."""
     model.eval()
     results: dict[PostProcessing, list[ImageResult]] = {s: [] for s in settings}
     baseline: list[ImageResult] = []
     for batch in loader:
-        with torch.autocast(device.type, enabled=amp):
-            logits = model(batch["image"].to(device, non_blocking=True))
-        probabilities = torch.sigmoid(logits.float()).cpu()
+        images = batch["image"].to(device, non_blocking=True)
+        probabilities = predict(model, images, inference, window, amp).cpu()
         masks, valid = batch["mask"], batch["valid"]
         batch_infos = [infos[file_id] for file_id in batch["file_id"]]
         for setting in settings:
@@ -413,6 +420,7 @@ class Evaluation:
     on: str  # "validation" or "test"
     checkpoint: str
     per_fold: dict[int, FoldEvaluation]
+    inference: dict[int, str]  # how each fold's model predicted: "whole" or "sliding"
     pooled: FoldEvaluation
 
 
@@ -442,6 +450,7 @@ def evaluate_folds(
     device: torch.device | None = None,
     amp: bool = False,
     canvas: tuple[int, int] = DEFAULT_CANVAS,
+    inference: Inference | None = None,
 ) -> Evaluation:
     """Score the checkpoint of each fold on its validation fold, or, with ``test``,
     on the held-out test set.
@@ -449,13 +458,16 @@ def evaluate_folds(
     The checkpoints are ``<runs_dir>/fold_<k>/<checkpoint_name>``. Raises ValueError
     for no folds or a repeated fold, a checkpoint of another fold or made with other
     preprocessing settings, splits without a test set, or splits made from another
-    manifest.
+    manifest. Each model predicts as its checkpoint records (in one pass if it
+    records nothing), or as ``inference`` says; sliding windows need a checkpoint
+    that records its window, ValueError otherwise.
     """
     if not folds or len(set(folds)) != len(folds):
         raise ValueError(f"the folds must be given once each, got {list(folds)}")
     device = device or resolve_device()
     record = read_record(preprocessed_dir / RECORD_FILE)
     per_fold: dict[int, FoldEvaluation] = {}
+    used: dict[int, str] = {}
     pooled = ModelResults({s: [] for s in settings}, [])
     for fold in folds:
         path = runs_dir / fold_name(fold) / checkpoint_name
@@ -478,6 +490,14 @@ def evaluate_folds(
         dataset = MammogramDataset(
             preprocessed_dir, ids, preprocessing_settings, canvas
         )
+        chosen: Inference = inference or checkpoint.metadata.get("inference", "whole")
+        stored = checkpoint.metadata.get("window")
+        if chosen == "sliding" and stored is None:
+            raise ValueError(
+                f"{path} records no window size, so it cannot predict in sliding "
+                "windows; it was trained before they existed"
+            )
+        window = (int(stored[0]), int(stored[1])) if stored is not None else None
         model = model_from_checkpoint(checkpoint).to(device)
         results = evaluate_model(
             model,
@@ -486,7 +506,10 @@ def evaluate_folds(
             device,
             image_infos(record, manifest, ids),
             amp,
+            chosen,
+            window,
         )
+        used[fold] = chosen
         per_fold[fold] = _fold_evaluation(results)
         for setting in settings:
             pooled.settings[setting].extend(results.settings[setting])
@@ -495,6 +518,7 @@ def evaluate_folds(
         on="test" if test else "validation",
         checkpoint=checkpoint_name,
         per_fold=per_fold,
+        inference=used,
         pooled=_fold_evaluation(pooled),
     )
 
@@ -557,9 +581,11 @@ def format_evaluation(evaluation: Evaluation) -> str:
     folds at the best setting, as text."""
     pooled = evaluation.pooled
     best = best_setting(pooled)
+    kinds = sorted(set(evaluation.inference.values()))
     lines = [
         f"{evaluation.checkpoint} on the {evaluation.on} images "
-        f"({pooled.images} scored, {len(evaluation.per_fold)} fold(s) pooled)",
+        f"({pooled.images} scored, {len(evaluation.per_fold)} fold(s) pooled), "
+        f"predicted {' and '.join(_INFERENCE_TEXT[kind] for kind in kinds)}",
         "",
         _HEADER,
     ]
@@ -578,6 +604,9 @@ def format_evaluation(evaluation: Evaluation) -> str:
     lines += ["", "by subgroup, all folds pooled, at the same setting:"]
     lines += _subgroup_lines(best.subgroups)
     return "\n".join(lines)
+
+
+_INFERENCE_TEXT = {"whole": "in one pass", "sliding": "in sliding windows"}
 
 
 def _subgroup_lines(groups: Subgroups) -> list[str]:
