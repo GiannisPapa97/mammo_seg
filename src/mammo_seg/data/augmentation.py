@@ -10,6 +10,14 @@ chosen mass pixel (when the image still has one after the geometric changes). An
 image smaller than the patch gives a smaller patch on that side; the dataset pads
 it to the canvas and marks the padding as not valid.
 
+The background of the images is exactly 0 (the scanner sets the air around the
+breast to 0), and so is the area that a rotation or shift brings in. Validation and
+inference see that background flat, so it stays exactly 0 here too: pixels that are
+0 after the geometric changes are set back to 0 after the intensity changes, which
+therefore only change the breast. Noise or a contrast shift on the background would
+give training an input that validation never has, and leave the network untrained
+on the flat background it meets there.
+
 There are no flips: preprocessing puts every chest wall on the left, and flipping
 would show the model breasts it never sees at inference.
 
@@ -116,12 +124,18 @@ class Augmentation:
         moved_image, moved_mask = self.geometric(
             tv_tensors.Image(image), tv_tensors.Mask(mask)
         )
+        background = moved_image.as_subclass(torch.Tensor) == 0
         changed = self.intensity(moved_image)
         if self.settings.gamma:
             low, high = 1 - self.settings.gamma, 1 + self.settings.gamma
             exponent = low + (high - low) * torch.rand(()).item()
             changed = changed.clamp(min=0) ** exponent
-        result = changed.as_subclass(torch.Tensor).clamp(0.0, 1.0)
+        # The background stays exactly 0, as validation and inference see it.
+        result = (
+            changed.as_subclass(torch.Tensor)
+            .clamp(0.0, 1.0)
+            .masked_fill(background, 0.0)
+        )
         mask_result = moved_mask.as_subclass(torch.Tensor)
         if self.settings.crop_size is not None:
             return self._crop(result, mask_result, kind)
