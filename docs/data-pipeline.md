@@ -243,7 +243,7 @@ uv run python -m mammo_seg.data.preprocess_dataset --size 768  # another size
 | Flip | `preprocess(...)` | Right breasts are flipped horizontally, so the chest wall is on the left in every image |
 | Normalize | `normalize_intensity(pixels)` | Scales to 0..1. Not stored: it runs when an image is loaded and at inference |
 
-`preprocess(pixels, laterality, settings)` runs crop, rescale and flip and returns the image together with a `PreprocessParams` record (the crop box, the size of the result and whether it was flipped). `preprocess_mask(mask, params)` applies the same geometry to a mask, and `restore_mask(mask, params)` maps a predicted mask back onto the original image. At inference a DICOM goes through `read_pixels`, `preprocess` and `normalize_intensity`, exactly like the stored training images.
+`preprocess(pixels, laterality, settings)` runs crop, rescale and flip and returns the image together with a `PreprocessParams` record (the crop box, the size of the result and whether it was flipped). `preprocess_mask(mask, params)` applies the same geometry to a mask, `preprocess_points(points, params)` to points such as the polygons of the annotations, and `restore_mask(mask, params)` maps a predicted mask back onto the original image. At inference a DICOM goes through `read_pixels`, `preprocess` and `normalize_intensity`, exactly like the stored training images.
 
 ### The breast box
 

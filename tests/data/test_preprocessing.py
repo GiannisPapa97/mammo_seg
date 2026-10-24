@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 from tests.data.synthetic import write_dicom_pixels
 
+from mammo_seg.data.masks import rasterize
 from mammo_seg.data.preprocessing import (
     DEFAULT_MARGIN,
     DEFAULT_MAX_INTENSITY,
@@ -17,10 +18,12 @@ from mammo_seg.data.preprocessing import (
     normalize_intensity,
     preprocess,
     preprocess_mask,
+    preprocess_points,
     read_pixels,
     restore_mask,
     target_shape,
 )
+from mammo_seg.data.schema import LesionType, Roi
 
 
 def image(
@@ -461,6 +464,53 @@ def test_a_crop_that_cuts_the_mask_is_an_error() -> None:
     mask[10:20, 10:20] = 1  # outside the breast box
     with pytest.raises(ValueError, match="cuts the mask"):
         preprocess_mask(mask, params)
+
+
+def box_params(flipped: bool) -> PreprocessParams:
+    """A 50 x 20 crop scaled by 2 in both directions."""
+    box = BoundingBox(top=10, bottom=60, left=20, right=40)
+    return PreprocessParams(
+        source_shape=(100, 80), box=box, shape=(100, 40), flipped=flipped
+    )
+
+
+@pytest.mark.parametrize(
+    ("flipped", "expected"),
+    [
+        (False, [[0.0, 0.0], [40.0, 100.0], [10.0, 50.0]]),
+        (True, [[40.0, 0.0], [0.0, 100.0], [30.0, 50.0]]),
+    ],
+)
+def test_points_are_cropped_scaled_and_flipped(
+    flipped: bool, expected: list[list[float]]
+) -> None:
+    # The corners of the box and a point inside it, as (x, y).
+    points = [(20.0, 10.0), (40.0, 60.0), (25.0, 35.0)]
+    assert np.allclose(preprocess_points(points, box_params(flipped)), expected)
+
+
+def test_points_outside_the_box_map_outside_the_result() -> None:
+    ((x, y),) = preprocess_points([(0.0, 70.0)], box_params(False))
+    assert x < 0 and y > 100
+
+
+@pytest.mark.parametrize("laterality", ["L", "R"])
+def test_a_polygon_lands_on_its_preprocessed_mask(laterality: str) -> None:
+    pixels, mask = lesion_image_and_mask()
+    settings = PreprocessingSettings(margin=0.05, downscale=1, opening=0, size=200)
+    _, params = preprocess(pixels, laterality, settings)  # type: ignore[arg-type]
+    corners = [(300.0, 250.0), (380.0, 250.0), (380.0, 330.0), (300.0, 330.0)]
+    moved = preprocess_points(corners, params)
+    roi = Roi(LesionType.MASS, tuple((float(x), float(y)) for x, y in moved))
+    drawn = rasterize([roi], params.shape) == 1
+    small_mask = preprocess_mask(mask, params) == 1
+    assert (drawn & small_mask).sum() / (drawn | small_mask).sum() > 0.9
+
+
+@pytest.mark.parametrize("shape", [(3,), (2, 3), (1, 2, 2)])
+def test_points_must_be_pairs(shape: tuple[int, ...]) -> None:
+    with pytest.raises(ValueError, match=r"\[n, 2\] points"):
+        preprocess_points(np.zeros(shape), box_params(False))
 
 
 @pytest.mark.parametrize("laterality", ["L", "R"])
