@@ -97,9 +97,14 @@ A checkpoint is about 100 MB of weights for the default model, and about 300 MB 
 `train_fold(manifest, splits_file, preprocessed_dir, fold, ...)` (`engine/train.py`) trains on every fold of the patient-level splits but one and validates on that one. Each epoch is a pass of training and a pass of validation:
 
 - **Training** draws batches balanced between images with and without a mass (the sampler of `loaders.py`, 50% by default), applies the augmentation, and minimizes the Dice + cross-entropy loss with Adam, on every pixel including the padding (section 2). The learning rate starts at 1e-4 and follows a cosine curve down to 0 over the epochs.
-- **Crops** (`--crop-size N`, off by default): training can use square patches of N pixels instead of whole images, half of them (`--crop-mass-fraction`) placed around a mass when the image has one (see the augmentation in [data-pipeline.md](data-pipeline.md)). The training canvas is then the crop size rounded up to a multiple of 32, so batches are cheaper and a larger `--batch-size` fits. Validation always uses whole images, so crop and whole-image runs are scored the same way. The crop settings are saved in the checkpoint, and a run cannot be resumed with other ones.
+- **Crops** (`--crop-size N`, off by default): training can use square patches of N pixels instead of whole images, half of them (`--crop-mass-fraction`) placed around a mass when the image has one (see the augmentation in [data-pipeline.md](data-pipeline.md)). The training canvas is then the crop size rounded up to a multiple of 32, so batches are cheaper and a larger `--batch-size` fits. Validation scores whole images either way, but a model trained on crops predicts them in sliding windows of the training canvas (see *How a whole image is predicted* below). The crop settings are saved in the checkpoint, and a run cannot be resumed with other ones.
 - **Batch composition** (`--batch-composition MASS NEG_FROM_MASS_IMAGES NEG_FROM_NORMAL_IMAGES`, for example `4 2 2`, needs `--crop-size`): instead of drawing images at random, every batch has that many patches that contain a mass, negative patches (no mass) from images with a mass, and negative patches from images without one. The batch size is their sum, `--positive-fraction` is not used, and the composition is saved in the checkpoint like the other settings, so a run cannot be resumed with another one. Patch kinds are described in [data-pipeline.md](data-pipeline.md). The negative patches of images with a mass are only mostly negative: when no patch avoids the mass, the one with the least of it is used, which happened for about a fifth of them on fold 0 at 512 px (a median of 0.23% of the patch), so about 55% of all patches hold mass pixels, not 50%. Implemented and tested on synthetic data; not yet run on the real data.
 - **Validation** runs on every image of the validation fold once and computes the metrics of section 1 for images with a mass, without one, and all images. All of them are logged every epoch.
+- **How a whole image is predicted** (`--inference`): a model should see at validation and at test what it saw in training, so there are two consistent designs.
+  - **Whole images**: trained without `--crop-size`, it predicts a whole image in one pass (`whole`).
+  - **Patches**: trained with `--crop-size`, it predicts a whole image in **sliding windows** of the training canvas (`sliding`, `engine/inference.py`). The windows overlap by half (the last one touches the far edge: on the 1024 x 800 canvas with 512 px windows, rows start at 0, 256 and 512 and columns at 0, 256 and 288, so 9 windows), and their probabilities are averaged with Gaussian weights (a standard deviation of an eighth of the window) that trust the centre of a window more than its borders, as nnU-Net does. It costs about 3 times the computation of one pass.
+
+  By default the inference follows the training: `sliding` with `--crop-size`, `whole` without. `--inference whole` with `--crop-size` gives the mixed design of the earlier crop runs (patches in training, whole images at validation), kept only to compare with. The choice and the window are stored in the checkpoints, a run is not resumed with other ones, and `mammo-seg evaluate` predicts the same way unless told otherwise.
 - **Mixed precision** (float16) is used on a CUDA GPU only: the network runs in it, the loss in float32, with a gradient scaler. On the CPU it is off whatever is asked.
 - **The best epoch** is the one with the highest value of the selection metric, by default the mean Dice over all validation images (`all_images.dice`). Another metric can be chosen, for example `with_mass.dice`; an undefined value (NaN) never wins. Note that on this dataset a model that predicts nothing already scores well on all images, because most images have no mass, so look at the images with a mass too.
 
@@ -114,6 +119,7 @@ A checkpoint is about 100 MB of weights for the default model, and about 300 MB 
 | `selection_metric` | `all_images.dice` |
 | `amp` | on (GPU only) |
 | `seed` | 0 |
+| `inference` | sliding windows with crops, one pass without |
 
 ### What a run writes
 
@@ -176,6 +182,7 @@ Below, the same setting **by subgroup**, all folds pooled, with the thresholds o
 Everything, the subgroups of every setting included, is also written to `<runs-dir>/evaluation_validation.json` (or `_test.json`; `--output` changes it).
 
 - A checkpoint trained for another fold, or on images preprocessed with other settings, is refused.
+- Each model predicts as its checkpoint records: in sliding windows if it was trained on crops, in one pass otherwise. `--inference whole` or `--inference sliding` overrides that, for example to score a patch model in one pass; sliding windows need a checkpoint that records its window, which those made before this option do not.
 - Choosing the setting on the validation predictions tunes it on data it was scored on, so it is slightly optimistic. Choose one setting for all folds (not one per fold, which would fit 15 to 19 images with a mass each), then score the test set once.
 - The command runs on a CPU, but a GPU is much faster. On Kaggle use [notebooks/06_kaggle_evaluation.ipynb](../notebooks/06_kaggle_evaluation.ipynb) with the saved output of the training notebook as an input.
 
