@@ -33,7 +33,10 @@ from mammo_seg.engine.train import (
     describe,
     epoch_seed,
     fit,
+    peak_memory_gb,
+    record_from_dict,
     record_to_json,
+    reset_peak_memory,
     selection_value,
     train_fold,
     train_one_epoch,
@@ -320,7 +323,7 @@ def test_a_model_that_predicts_nothing_gets_the_documented_scores(data: Data) ->
 # --- the history ---
 
 
-def record(epoch: int = 1) -> EpochRecord:
+def record(epoch: int = 1, peak_gpu_memory_gb: float | None = None) -> EpochRecord:
     return EpochRecord(
         epoch=epoch,
         learning_rate=1e-4,
@@ -328,6 +331,7 @@ def record(epoch: int = 1) -> EpochRecord:
         seconds=3.2,
         validation=summary(0.6),
         selection_value=0.6,
+        peak_gpu_memory_gb=peak_gpu_memory_gb,
     )
 
 
@@ -345,6 +349,37 @@ def test_the_log_line_names_the_epoch_and_the_selection_metric() -> None:
     text = describe(record(epoch=7), "all_images.dice")
     assert text.startswith("epoch 7:")
     assert "all_images.dice 0.6000" in text and "train loss 0.5000" in text
+
+
+def test_the_log_line_names_the_peak_memory_on_a_gpu_only() -> None:
+    assert describe(record(peak_gpu_memory_gb=5.26), "all_images.dice").endswith(
+        ", peak GPU memory 5.3 GB"
+    )
+    assert "memory" not in describe(record(), "all_images.dice")
+
+
+def test_a_history_from_before_the_peak_memory_is_still_read() -> None:
+    old = json.loads(record_to_json(record()))
+    del old["peak_gpu_memory_gb"]
+    assert record_from_dict(old).peak_gpu_memory_gb is None
+
+
+def test_the_peak_memory_is_measured_on_a_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    gpu = torch.device("cuda", 0)
+    calls: list[torch.device] = []
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", calls.append)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda device: 3 * 2**29)
+    reset_peak_memory(gpu)
+    assert calls == [gpu] and peak_memory_gb(gpu) == 1.5
+
+
+def test_there_is_no_peak_memory_off_the_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(device: torch.device) -> None:
+        raise AssertionError("CUDA must not be touched on the CPU")
+
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", fail)
+    reset_peak_memory(CPU)
+    assert peak_memory_gb(CPU) is None
 
 
 # --- fit ---
@@ -382,6 +417,7 @@ def test_fit_runs_the_epochs_validates_and_writes_the_history(
     assert all(math.isfinite(r.train_loss) for r in result.history)
     lines = (output / HISTORY_FILE).read_text().splitlines()
     assert [json.loads(line)["epoch"] for line in lines] == [1, 2, 3]
+    assert all(json.loads(line)["peak_gpu_memory_gb"] is None for line in lines)
     assert len([m for m in caplog.messages if m.startswith("epoch ")]) == 3
     assert result.stop_reason == "finished"
 

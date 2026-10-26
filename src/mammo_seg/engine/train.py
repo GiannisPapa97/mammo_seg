@@ -22,7 +22,9 @@ a pass of validation:
   computed in float32 and a gradient scaler guards against underflow. It is off on
   the CPU, where it brings nothing
 - one line per epoch goes to the log and, if an output folder is given, one JSON
-  line per epoch to ``history.jsonl`` there (an undefined metric is ``null``)
+  line per epoch to ``history.jsonl`` there (an undefined metric is ``null``). On a
+  GPU, both record the peak memory of the epoch, which tells whether a larger
+  input or batch still fits
 
 The model with the best value of the selection metric is the one to keep; by
 default that is the mean Dice over all validation images.
@@ -142,6 +144,9 @@ class EpochRecord:
     seconds: float
     validation: Summary
     selection_value: float  # NaN when the selection metric is undefined
+    # The most GPU memory PyTorch held during the epoch, training and validation;
+    # None off the GPU, and in the history of a run from before it was recorded.
+    peak_gpu_memory_gb: float | None = None
 
 
 # Settings that may differ between the sessions of one run: they do not change what
@@ -196,6 +201,21 @@ def _to_device(
         batch["mask"].to(device, non_blocking=True),
         batch["valid"].to(device, non_blocking=True),
     )
+
+
+def reset_peak_memory(device: torch.device) -> None:
+    """Start measuring the peak GPU memory again; nothing off the GPU."""
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def peak_memory_gb(device: torch.device) -> float | None:
+    """The most memory PyTorch held on the GPU since ``reset_peak_memory``, in GB
+    (2**30 bytes), or None off the GPU. It is the memory reserved by the caching
+    allocator, not only that of live tensors, because that is what runs out."""
+    if device.type != "cuda":
+        return None
+    return torch.cuda.max_memory_reserved(device) / 2**30
 
 
 def train_one_epoch(
@@ -277,6 +297,11 @@ def describe(record: EpochRecord, selection_metric: str) -> str:
         f"sensitivity {positives.sensitivity:.4f}), "
         f"false alarms {record.validation.without_mass.false_alarm_rate:.3f}, "
         f"{selection_metric} {record.selection_value:.4f}, {record.seconds:.0f} s"
+        + (
+            f", peak GPU memory {record.peak_gpu_memory_gb:.1f} GB"
+            if record.peak_gpu_memory_gb is not None
+            else ""
+        )
     )
 
 
@@ -505,6 +530,7 @@ def fit(
         if train_loader.generator is not None:
             train_loader.generator.manual_seed(seed)
         learning_rate = optimizer.param_groups[0]["lr"]
+        reset_peak_memory(device)
         train_loss = train_one_epoch(
             model, train_loader, loss_function, optimizer, scaler, device, amp
         )
@@ -518,6 +544,7 @@ def fit(
             seconds=time.monotonic() - started,
             validation=summary,
             selection_value=value,
+            peak_gpu_memory_gb=peak_memory_gb(device),
         )
         slowest = max(slowest, record.seconds)
         progress.history.append(record)
