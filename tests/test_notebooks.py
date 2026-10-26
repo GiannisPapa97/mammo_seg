@@ -16,6 +16,7 @@ KAGGLE = Path("notebooks/05_kaggle_training.ipynb")
 EVALUATION = Path("notebooks/06_kaggle_evaluation.ipynb")
 COMPARISON = Path("notebooks/08_kaggle_whole_vs_patches.ipynb")
 ERRORS = Path("notebooks/09_error_analysis.ipynb")
+GALLERY = Path("notebooks/10_error_gallery.ipynb")
 DATA_STEPS = {"manifest", "splits", "masks", "preprocess"}
 
 
@@ -183,3 +184,26 @@ def test_the_error_analysis_looks_at_a_setting_the_evaluation_tries() -> None:
     assert settings["THRESHOLD"] in DEFAULT_THRESHOLDS
     assert settings["MIN_AREA_MM2"] in DEFAULT_MIN_AREAS_MM2
     assert settings["NEAR_MM"] > 0 and 0 < settings["CHEST_WALL"] < 1
+
+
+def test_the_error_gallery_shows_a_setting_the_evaluation_tries() -> None:
+    names = (
+        "THRESHOLD",
+        "MIN_AREA_MM2",
+        "FLOOR",
+        "ZOOM_MM",
+        "NEAR_MM",
+        "CHEST_WALL",
+        "ROWS_PER_FIGURE",
+    )
+    settings = settings_of(GALLERY, *names)
+    assert set(settings) == set(names)
+    assert settings["THRESHOLD"] in DEFAULT_THRESHOLDS
+    assert settings["MIN_AREA_MM2"] in DEFAULT_MIN_AREAS_MM2
+    # The probabilities are drawn from the floor up, so it must lie below the threshold.
+    assert 0 < settings["FLOOR"] < settings["THRESHOLD"]
+    assert settings["ZOOM_MM"] > 0 and settings["NEAR_MM"] > 0
+    assert 0 < settings["CHEST_WALL"] < 1 and settings["ROWS_PER_FIGURE"] >= 1
+    # The gallery groups the false regions as the error analysis does.
+    analysis = settings_of(ERRORS, "NEAR_MM", "CHEST_WALL")
+    assert {k: settings[k] for k in analysis} == analysis
