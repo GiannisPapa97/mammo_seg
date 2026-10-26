@@ -42,6 +42,7 @@ whole/evaluation_validation_details.json   # every validation image with its res
 whole/evaluation_code_version.txt          # the commit of the details run
 whole/evaluation_details.log               # the log of the details run
 whole/fold_<k>/history.jsonl               # the training curves
+whole/fold_<k>/last.pt                     # the checkpoints, for notebooks/10_error_gallery.ipynb (download from Kaggle)
 patches/evaluation_validation.json
 patches/fold_<k>/history.jsonl
 ```
