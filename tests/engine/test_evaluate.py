@@ -21,6 +21,7 @@ from mammo_seg.data.preprocessing import (
 )
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile, create_splits_file
+from mammo_seg.engine.bootstrap import bootstrap
 from mammo_seg.engine.checkpoint import save_checkpoint
 from mammo_seg.engine.evaluate import (
     DEFAULT_MIN_AREAS_MM2,
@@ -754,6 +755,35 @@ def test_the_details_hold_every_image_under_every_setting(
     assert len(with_mass) == 4
     (mass,) = with_mass[0]["results"][0]["masses"]
     assert set(mass) == {"area_mm2", "found", "iou", "row", "col", "peak"}
+
+
+def test_the_bootstrap_reads_the_details_as_the_evaluation_scored_them(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    evaluation = evaluate(tmp_path, manifest)
+    details = json.loads(json.dumps(details_to_dict(evaluation)))
+    for pooled in evaluation.pooled.settings:
+        setting = pooled.setting
+        values = {
+            name: interval.value
+            for name, interval in bootstrap(
+                details, setting.threshold, setting.min_area_mm2, resamples=10
+            ).metrics.items()
+        }
+        summary = pooled.summary
+        expected = {
+            "with_mass.dice": summary.with_mass.dice,
+            "with_mass.iou": summary.with_mass.iou,
+            "with_mass.precision": summary.with_mass.precision,
+            "with_mass.sensitivity": summary.with_mass.sensitivity,
+            "without_mass.false_alarm_rate": summary.without_mass.false_alarm_rate,
+            "all_images.dice": summary.all_images.dice,
+            "masses_found": pooled.found_masses,
+            "small_masses_found": pooled.subgroups.masses["small"].found_masses,
+            "large_masses_found": pooled.subgroups.masses["large"].found_masses,
+            "false_regions_per_image": pooled.false_regions_per_image,
+        }
+        assert values == pytest.approx(expected, nan_ok=True)
 
 
 def test_the_text_shows_the_sweep_the_baseline_and_the_folds(
