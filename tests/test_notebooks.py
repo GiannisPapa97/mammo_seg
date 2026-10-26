@@ -86,6 +86,24 @@ def test_the_kaggle_notebooks_use_options_that_exist(
         assert used <= options_of(f"{name}", capsys), command
 
 
+def test_the_training_and_the_evaluation_preprocess_alike(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    options = {
+        notebook: settings_of(notebook, "PREPROCESS_OPTIONS")["PREPROCESS_OPTIONS"]
+        for notebook in (KAGGLE, EVALUATION)
+    }
+    # A model is evaluated on images preprocessed as it was trained.
+    assert options[KAGGLE] == options[EVALUATION]
+    used = set(re.findall(r"--[a-z][a-z-]*", options[KAGGLE]))
+    assert used <= options_of("preprocess", capsys)
+    for notebook in options:
+        (preprocess,) = [
+            c for c in commands(notebook) if c.startswith("mammo-seg preprocess ")
+        ]
+        assert preprocess.endswith("{PREPROCESS_OPTIONS}")
+
+
 def test_the_kaggle_notebook_settings_are_valid() -> None:
     settings = settings_of(KAGGLE, "FOLDS", "TRAIN_OPTIONS")
     assert settings["FOLDS"] and set(settings["FOLDS"]) <= set(range(5))
