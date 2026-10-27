@@ -222,6 +222,26 @@ def test_the_batch_size_defaults_to_4(
     assert settings.batch_size == 4 and settings.composition is None
 
 
+def test_the_small_mass_fraction_is_off_unless_given(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = captured_settings(monkeypatch, project.train_args(*TINY))
+    assert settings.small_mass_fraction is None
+    options = ["--small-mass-fraction", "0.5", *TINY]
+    settings = captured_settings(monkeypatch, project.train_args(*options))
+    assert settings.small_mass_fraction == 0.5
+
+
+def test_a_small_mass_fraction_with_a_composition_is_an_error(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = ["--crop-size", "32", "--batch-composition", "2", "1", "1"]
+    options += ["--small-mass-fraction", "0.5", *TINY]
+    arguments = without_batch_size(project.train_args(*options))
+    assert cli.main(arguments) == 1
+    assert "needs the sampler" in capsys.readouterr().err
+
+
 def test_a_batch_composition_sets_the_batch_size(
     project: Project, monkeypatch: pytest.MonkeyPatch
 ) -> None:

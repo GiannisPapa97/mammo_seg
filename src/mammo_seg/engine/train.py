@@ -99,6 +99,9 @@ class TrainingSettings:
     learning_rate: Annotated[float, Field(gt=0)] = 1e-4  # at the start; cosine decay
     # Share of images with a mass in a training batch; None draws every image once.
     positive_fraction: Annotated[float, Field(gt=0, lt=1)] | None = 0.5
+    # Share of images with a small mass among the images with a mass drawn; None
+    # draws every image with a mass equally (about 28% have a small one).
+    small_mass_fraction: Annotated[float, Field(gt=0, lt=1)] | None = None
     # Every batch holds this many patches of each kind, instead of the draw above
     # (which is then not used). It needs crops and a batch size equal to its size.
     composition: BatchComposition | None = None
@@ -130,6 +133,17 @@ class TrainingSettings:
             raise ValueError(
                 f"the batch size is {self.batch_size} but the composition "
                 f"{self.composition} has {self.composition.size} patches"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _small_masses_need_the_sampler(self) -> Self:
+        if self.small_mass_fraction is not None and (
+            self.composition is not None or self.positive_fraction is None
+        ):
+            raise ValueError(
+                "a small-mass fraction needs the sampler (a positive fraction), "
+                "without a batch composition"
             )
         return self
 
@@ -652,6 +666,7 @@ def train_fold(
         settings.num_workers,
         settings.seed,
         settings.composition,
+        settings.small_mass_fraction,
     )
     validation_loader = evaluation_loader(
         validation_data, settings.batch_size, settings.num_workers

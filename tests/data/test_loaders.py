@@ -17,6 +17,7 @@ from mammo_seg.data.loaders import (
     balanced_sampler,
     evaluation_loader,
     has_mass_of,
+    has_small_mass_of,
     pad_to_multiple,
     training_loader,
     unpad,
@@ -86,6 +87,147 @@ def test_one_class_alone_cannot_be_balanced() -> None:
         balanced_sampler([False, False, False])
     with pytest.raises(ValueError, match="2 images with a mass and 0 without"):
         balanced_sampler([True, True])
+
+
+# --- small masses ---
+
+# 4 images with a small mass, 16 with only larger ones, 80 without a mass.
+HAS_MASS = [True] * 20 + [False] * 80
+HAS_SMALL = [True] * 4 + [False] * 96
+
+
+def shares(sampler: torch.utils.data.Sampler[int]) -> tuple[float, float]:
+    """The share of the draws with a mass, and of those the share with a small one."""
+    drawn = list(sampler)
+    with_mass = [i for i in drawn if HAS_MASS[i]]
+    small = [i for i in with_mass if HAS_SMALL[i]]
+    return len(with_mass) / len(drawn), len(small) / len(with_mass)
+
+
+def test_without_a_small_mass_fraction_the_draws_are_as_before() -> None:
+    sampler = balanced_sampler(HAS_MASS, 0.5, has_small_mass=HAS_SMALL)
+    weights = sampler.weights.tolist()
+    assert weights == pytest.approx([0.5 / 20] * 20 + [0.5 / 80] * 80)
+
+
+def test_the_sampler_draws_about_the_small_mass_fraction() -> None:
+    generator = torch.Generator().manual_seed(0)
+    for fraction in (0.5, 0.7):
+        sampler = balanced_sampler(
+            HAS_MASS,
+            0.5,
+            num_samples=40000,
+            generator=generator,
+            has_small_mass=HAS_SMALL,
+            small_mass_fraction=fraction,
+        )
+        with_mass, small = shares(sampler)
+        # The share of the images with a mass stays what it was.
+        assert with_mass == pytest.approx(0.5, abs=0.02)
+        assert small == pytest.approx(fraction, abs=0.02)
+
+
+def test_the_small_mass_weights_add_up_to_the_positive_fraction() -> None:
+    sampler = balanced_sampler(
+        HAS_MASS, 0.4, has_small_mass=HAS_SMALL, small_mass_fraction=0.5
+    )
+    weights = sampler.weights.tolist()
+    assert weights[:4] == pytest.approx([0.4 * 0.5 / 4] * 4)
+    assert weights[4:20] == pytest.approx([0.4 * 0.5 / 16] * 16)
+    assert weights[20:] == pytest.approx([0.6 / 80] * 80)
+
+
+@pytest.mark.parametrize("fraction", [0.0, 1.0, -0.1])
+def test_a_small_mass_fraction_outside_0_and_1_is_rejected(fraction: float) -> None:
+    with pytest.raises(ValueError, match="small-mass fraction"):
+        balanced_sampler(
+            HAS_MASS, has_small_mass=HAS_SMALL, small_mass_fraction=fraction
+        )
+
+
+@pytest.mark.parametrize(
+    "has_small", [[False] * 100, [True] * 20 + [False] * 80], ids=["none", "all"]
+)
+def test_small_masses_cannot_be_balanced_without_both_kinds(
+    has_small: list[bool],
+) -> None:
+    with pytest.raises(ValueError, match="cannot balance"):
+        balanced_sampler(HAS_MASS, has_small_mass=has_small, small_mass_fraction=0.5)
+
+
+@pytest.mark.parametrize("has_small", [None, [True] * 4], ids=["missing", "short"])
+def test_a_small_mass_fraction_needs_the_small_mass_of_every_image(
+    has_small: list[bool] | None,
+) -> None:
+    with pytest.raises(ValueError, match="small mass of every image"):
+        balanced_sampler(HAS_MASS, has_small_mass=has_small, small_mass_fraction=0.5)
+
+
+def test_a_small_mass_is_one_under_100_mm2_on_its_polygon() -> None:
+    images = [
+        make_image(1, 1, masses=1, mass_mm2=99.0),
+        make_image(2, 2, masses=1, mass_mm2=101.0),
+        make_image(3, 3),
+        make_image(4, 4, masses=2, mass_mm2=50.0),
+    ]
+    manifest = Manifest(version=1, images=tuple(images))
+    ids = ["00000004", "00000003", "00000002", "00000001"]
+    assert has_small_mass_of(manifest, ids) == [True, False, False, True]
+    assert has_small_mass_of(manifest, ids, small_mass_mm2=200.0) == [
+        True,
+        False,
+        True,
+        True,
+    ]
+    with pytest.raises(ValueError, match="not in the manifest"):
+        has_small_mass_of(manifest, ["00000009"])
+
+
+@pytest.fixture
+def small_and_large() -> Manifest:
+    """Image 1 with a small mass, image 2 with a large one, image 3 without."""
+    images = [
+        make_image(1, 1, masses=1, mass_mm2=50.0),
+        make_image(2, 2, masses=1, mass_mm2=500.0),
+        make_image(3, 3),
+    ]
+    return Manifest(version=1, images=tuple(images))
+
+
+def test_the_training_loader_draws_the_small_masses_more_often(
+    dataset: MammogramDataset, small_and_large: Manifest
+) -> None:
+    def counts(fraction: float | None) -> Counter[str]:
+        loader = training_loader(
+            dataset,
+            small_and_large,
+            batch_size=4,
+            samples_per_epoch=2000,
+            small_mass_fraction=fraction,
+        )
+        return Counter(drawn_ids(loader))
+
+    natural, more = counts(None), counts(0.8)
+    assert natural["00000001"] / 2000 == pytest.approx(0.25, abs=0.04)
+    assert more["00000001"] / 2000 == pytest.approx(0.4, abs=0.04)
+    assert more["00000003"] / 2000 == pytest.approx(0.5, abs=0.04)
+
+
+def test_a_small_mass_fraction_needs_the_sampler_without_a_composition(
+    dataset: MammogramDataset, small_and_large: Manifest
+) -> None:
+    with pytest.raises(ValueError, match="needs the sampler"):
+        training_loader(
+            dataset, small_and_large, 4, positive_fraction=None, small_mass_fraction=0.5
+        )
+    with pytest.raises(ValueError, match="needs the sampler"):
+        training_loader(
+            dataset,
+            small_and_large,
+            4,
+            composition=BatchComposition(2, 1, 1),
+            small_mass_fraction=0.5,
+        )
 
 
 def test_has_mass_follows_the_order_of_the_ids(manifest: Manifest) -> None:

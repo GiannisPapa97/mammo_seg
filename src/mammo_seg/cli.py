@@ -122,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="share of training images with a mass in an epoch",
     )
     training.add_argument(
+        "--small-mass-fraction",
+        type=float,
+        default=None,
+        help="share of the training images with a mass that have a small one "
+        "(< 100 mm²) in an epoch (default: as they come, about 0.28)",
+    )
+    training.add_argument(
         "--crop-size",
         type=int,
         default=None,
@@ -360,6 +367,7 @@ def _train(args: argparse.Namespace) -> int:
             batch_size=batch_size,
             learning_rate=args.learning_rate,
             positive_fraction=args.positive_fraction,
+            small_mass_fraction=args.small_mass_fraction,
             composition=composition,
             samples_per_epoch=args.samples_per_epoch,
             amp=args.amp,
