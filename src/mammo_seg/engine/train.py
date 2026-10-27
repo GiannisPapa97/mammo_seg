@@ -6,8 +6,10 @@ a pass of validation:
 
 - training draws batches balanced between images with and without a mass, or, with
   a ``BatchComposition``, batches of a fixed make-up of patches
-  (``loaders.training_loader``) and minimizes ``DiceBCELoss`` with Adam, with a
-  learning rate that follows a cosine curve down to 0 over the epochs. The loss
+  (``loaders.training_loader``) and minimizes ``DiceBCELoss`` with AdamW, with a
+  learning rate that follows a cosine curve down to 0 over the epochs. AdamW is
+  Adam with a decoupled weight decay, which shrinks every weight a little at each
+  step; without it (the default) AdamW makes the same steps as Adam. The loss
   counts every pixel, the padding too, as background: no mass can be there, and
   the network sees padding at inference as well, so it learns that flat 0 is not a
   mass. Without it, the flat background was left untrained and validation predicted
@@ -55,7 +57,7 @@ import torch
 from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from torch import nn
-from torch.optim import Adam
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
@@ -97,6 +99,9 @@ class TrainingSettings:
     epochs: Annotated[int, Field(ge=1)] = 60
     batch_size: Annotated[int, Field(ge=1)] = 4
     learning_rate: Annotated[float, Field(gt=0)] = 1e-4  # at the start; cosine decay
+    # Decoupled weight decay of AdamW: each step multiplies the weights by
+    # 1 - learning rate * weight decay. 0 is plain Adam.
+    weight_decay: Annotated[float, Field(ge=0)] = 0.0
     # Share of images with a mass in a training batch; None draws every image once.
     positive_fraction: Annotated[float, Field(gt=0, lt=1)] | None = 0.5
     # Share of images with a small mass among the images with a mass drawn; None
@@ -489,7 +494,11 @@ def fit(
     model.to(device)
     amp = settings.amp and device.type == "cuda"
     loss_function = DiceBCELoss()
-    optimizer = Adam(model.parameters(), lr=settings.learning_rate)
+    optimizer = AdamW(
+        model.parameters(),
+        lr=settings.learning_rate,
+        weight_decay=settings.weight_decay,
+    )
     scheduler = CosineAnnealingLR(optimizer, T_max=settings.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
     progress = _Progress(history=[])

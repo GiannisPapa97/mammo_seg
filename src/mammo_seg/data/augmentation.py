@@ -1,9 +1,10 @@
 """Random augmentation of training samples, applied to image and mask together.
 
 Built on torchvision ``transforms.v2``: geometric changes (rotation, scale and
-shift) move the image and its mask the same way, with the mask resampled by
-nearest neighbour so it stays 0/1. Intensity changes (brightness, contrast, gamma,
-noise) only touch the image. An optional crop then cuts a patch out of both. The
+shift, then an optional elastic deformation) move the image and its mask the same
+way, with the mask resampled by nearest neighbour so it stays 0/1. Intensity
+changes (brightness, contrast, gamma, noise) only touch the image. An optional crop
+then cuts a patch out of both. The
 masses cover well under 1% of an image, so a uniformly random patch seldom holds
 one: with probability ``crop_mass_fraction`` the patch is placed around a randomly
 chosen mass pixel (when the image still has one after the geometric changes). An
@@ -18,8 +19,17 @@ therefore only change the breast. Noise or a contrast shift on the background wo
 give training an input that validation never has, and leave the network untrained
 on the flat background it meets there.
 
+The elastic deformation bends the image and its masses smoothly, so the model sees
+other shapes of the same masses. Random displacements are drawn on a coarse grid of
+control points, ``elastic_spacing`` pixels apart, and interpolated smoothly
+(bicubic) to every pixel. torchvision's ``ElasticTransform`` blurs a random field
+of the full size instead, which takes about 6 s per 1024 x 800 image on a CPU core,
+too slow for a data loader; the coarse grid takes a small fraction of that.
+
 There are no flips: preprocessing puts every chest wall on the left, and flipping
-would show the model breasts it never sees at inference.
+would show the model breasts it never sees at inference. That holds for a flip from
+top to bottom too, which would put the pectoral muscle of the MLO views at the
+bottom.
 
 A crop can also be asked for by kind, to build batches of a known composition: a
 ``"mass"`` patch contains at least one mass pixel (when the image still has one) and
@@ -31,11 +41,13 @@ Augmentation is only for training. It uses PyTorch's random number generator, so
 seeding PyTorch (the data loaders do) makes it reproducible.
 """
 
+import math
 from typing import Annotated, Literal
 
 import torch
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
+from torch.nn import functional
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
@@ -65,6 +77,11 @@ class AugmentationSettings:
     contrast: Annotated[float, Field(ge=0, lt=1)] = 0.1
     gamma: Annotated[float, Field(ge=0, lt=1)] = 0.2  # exponent in 1 +- gamma
     noise: Annotated[float, Field(ge=0)] = 0.01  # standard deviation
+    # Elastic deformation: the standard deviation of the displacement at the control
+    # points, in pixels (0 is off; over all pixels it is about 0.85 of this), and
+    # the distance between the control points.
+    elastic: Annotated[float, Field(ge=0)] = 0.0
+    elastic_spacing: Annotated[int, Field(ge=2)] = 64
     # A patch of (height, width) instead of the whole image; off by default.
     crop_size: (
         tuple[Annotated[int, Field(ge=1)], Annotated[int, Field(ge=1)]] | None
@@ -124,6 +141,15 @@ class Augmentation:
         moved_image, moved_mask = self.geometric(
             tv_tensors.Image(image), tv_tensors.Mask(mask)
         )
+        if self.settings.elastic:
+            bent_image, bent_mask = elastic(
+                moved_image.as_subclass(torch.Tensor),
+                moved_mask.as_subclass(torch.Tensor),
+                self.settings.elastic,
+                self.settings.elastic_spacing,
+            )
+            moved_image = tv_tensors.Image(bent_image)
+            moved_mask = tv_tensors.Mask(bent_mask)
         background = moved_image.as_subclass(torch.Tensor) == 0
         changed = self.intensity(moved_image)
         if self.settings.gamma:
@@ -190,6 +216,54 @@ class Augmentation:
                 best = (held, top, left)
         assert best is not None
         return best[1], best[2]
+
+
+def elastic_displacement(
+    height: int, width: int, strength: float, spacing: int
+) -> torch.Tensor:
+    """A smooth random displacement of every pixel, ``[2, height, width]`` (rows,
+    then columns), in pixels.
+
+    Drawn from a normal distribution with a standard deviation of ``strength`` at
+    control points ``spacing`` pixels apart, which cover the image, and interpolated
+    bicubically in between.
+    """
+    points = (math.ceil(height / spacing) + 1, math.ceil(width / spacing) + 1)
+    coarse = torch.randn(1, 2, *points) * strength
+    # The outer control points lie on the borders, so they are at most ``spacing``
+    # pixels apart.
+    return functional.interpolate(
+        coarse, size=(height, width), mode="bicubic", align_corners=True
+    )[0]
+
+
+def elastic(
+    image: torch.Tensor, mask: torch.Tensor, strength: float, spacing: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bend a ``[1, H, W]`` image and its mask by the same smooth random
+    displacement (see ``elastic_displacement``): the image is resampled
+    bilinearly, the mask by nearest neighbour, so it stays 0/1. What comes in from
+    outside the image is 0."""
+    height, width = image.shape[-2:]
+    shift = elastic_displacement(height, width, strength, spacing)
+    rows = torch.arange(height, dtype=torch.float32)[:, None] + shift[0]
+    cols = torch.arange(width, dtype=torch.float32)[None, :] + shift[1]
+    # grid_sample takes (x, y) in -1..1, with align_corners the centres of the
+    # first and last pixels.
+    grid = torch.stack(
+        (cols * 2 / max(width - 1, 1) - 1, rows * 2 / max(height - 1, 1) - 1), dim=-1
+    )[None]
+
+    def sample(values: torch.Tensor, mode: str) -> torch.Tensor:
+        return functional.grid_sample(
+            values[None].float(),
+            grid,
+            mode=mode,
+            padding_mode="zeros",
+            align_corners=True,
+        )[0].to(values.dtype)
+
+    return sample(image, "bilinear"), sample(mask, "nearest")
 
 
 def _around(

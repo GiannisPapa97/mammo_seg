@@ -45,6 +45,28 @@ SELECTION_METRICS = tuple(
     for group in ("with_mass", "without_mass", "all_images")
     for metric in ("dice", "iou", "precision", "sensitivity")
 )
+# The augmentation options of ``train``: setting -> (type, default, help). The
+# intensity changes touch the breast only.
+AUGMENTATION_OPTIONS: dict[str, tuple[type, float, str]] = {
+    "rotation": (float, 10.0, "rotate by up to this many degrees, either way"),
+    "scale": (float, 0.1, "zoom by a factor of 1 +- this"),
+    "shift": (float, 0.1, "shift by up to this share of the width and height"),
+    "brightness": (float, 0.1, "multiply the intensities by 1 +- this"),
+    "contrast": (float, 0.1, "change the contrast by a factor of 1 +- this"),
+    "gamma": (float, 0.2, "raise the intensities to a power of 1 +- this"),
+    "noise": (float, 0.01, "standard deviation of added Gaussian noise"),
+    "elastic": (
+        float,
+        0.0,
+        "elastic deformation: standard deviation of the displacement at the "
+        "control points, in pixels; 0 is off",
+    ),
+    "elastic_spacing": (
+        int,
+        64,
+        "elastic deformation: pixels between the control points",
+    ),
+}
 
 # The data steps: name -> (help, main). Their options are their own.
 STEPS: dict[str, tuple[str, Callable[[Sequence[str] | None], int]]] = {
@@ -116,6 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     training.add_argument("--learning-rate", type=float, default=1e-4)
     training.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.0,
+        help="decoupled weight decay of AdamW; 0 is plain Adam",
+    )
+    training.add_argument(
         "--positive-fraction",
         type=float,
         default=0.5,
@@ -185,6 +213,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     training.add_argument("--num-workers", type=int, default=0)
     training.add_argument("--seed", type=int, default=0)
+
+    augmentation = train.add_argument_group(
+        "augmentation", "random changes of the training images; 0 switches one off"
+    )
+    for name, (kind, default, text) in AUGMENTATION_OPTIONS.items():
+        augmentation.add_argument(
+            f"--{name.replace('_', '-')}", type=kind, default=default, help=text
+        )
 
     model = train.add_argument_group("model")
     model.add_argument("--architecture", choices=ARCHITECTURES, default="unet")
@@ -366,6 +402,7 @@ def _train(args: argparse.Namespace) -> int:
             epochs=args.epochs,
             batch_size=batch_size,
             learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
             positive_fraction=args.positive_fraction,
             small_mass_fraction=args.small_mass_fraction,
             composition=composition,
@@ -382,6 +419,7 @@ def _train(args: argparse.Namespace) -> int:
             encoder_weights=None if args.encoder_weights == "none" else "imagenet",
         )
         augmentation = AugmentationSettings(
+            **{name: getattr(args, name) for name in AUGMENTATION_OPTIONS},
             crop_size=(args.crop_size, args.crop_size)
             if args.crop_size is not None
             else None,
