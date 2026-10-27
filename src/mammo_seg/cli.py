@@ -3,6 +3,7 @@
     mammo-seg manifest | splits | masks | preprocess   # the data pipeline
     mammo-seg train                                    # train a model on one fold
     mammo-seg evaluate                                 # score trained models
+    mammo-seg compare                                  # confidence intervals
 
 The data steps are the commands of ``mammo_seg.data`` (``python -m
 mammo_seg.data.splits ...`` does the same as ``mammo-seg splits ...``); each takes
@@ -26,6 +27,11 @@ from pathlib import Path
 from mammo_seg.data import manifest, masks, preprocess_dataset, splits
 from mammo_seg.data.preprocess_dataset import RECORD_FILE, read_record
 from mammo_seg.data.splits import fold_name, read_splits
+from mammo_seg.engine.bootstrap import (
+    DEFAULT_LEVEL,
+    DEFAULT_RESAMPLES,
+    DEFAULT_SEED,
+)
 
 DEFAULT_OUTPUT_DIR = Path("runs")
 # The choices and defaults of the engine, spelled out because importing the engine
@@ -259,6 +265,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="the JSON file with all results "
         "(default: <runs-dir>/evaluation_<validation|test>.json)",
     )
+
+    compare = commands.add_parser(
+        "compare",
+        help="confidence intervals of an evaluation, or of the difference of two",
+        description="Confidence intervals of the metrics of an evaluation at one "
+        "setting, by resampling its patients (the bootstrap), from the details file "
+        "of mammo-seg evaluate --details. With a second details file of the same "
+        "images, also the paired difference, second minus first: an interval that "
+        "excludes 0 is more than the luck of which patients were scored.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    compare.add_argument(
+        "details", type=Path, help="the details file of an evaluation (the first)"
+    )
+    compare.add_argument(
+        "other",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="the details file of a second evaluation of the same images",
+    )
+    compare.add_argument(
+        "--threshold", type=float, required=True, help="the setting to compare at"
+    )
+    compare.add_argument(
+        "--min-area-mm2",
+        type=float,
+        required=True,
+        help="the minimum region size of the setting, in mm²",
+    )
+    compare.add_argument(
+        "--resamples",
+        type=int,
+        default=DEFAULT_RESAMPLES,
+        help="the number of draws of the patients",
+    )
+    compare.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    compare.add_argument(
+        "--level",
+        type=float,
+        default=DEFAULT_LEVEL,
+        help="the share of the draws the interval holds",
+    )
+    compare.add_argument(
+        "--output", type=Path, default=None, help="also write the results as JSON"
+    )
     return parser
 
 
@@ -420,12 +472,47 @@ def _evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _compare(args: argparse.Namespace) -> int:
+    from mammo_seg.engine.bootstrap import bootstrap, compare, format_result, to_dict
+
+    paths = [args.details] if args.other is None else [args.details, args.other]
+    options = {"resamples": args.resamples, "seed": args.seed, "level": args.level}
+    try:
+        found = [json.loads(path.read_text()) for path in paths]
+        result = (
+            bootstrap(found[0], args.threshold, args.min_area_mm2, **options)
+            if len(found) == 1
+            else compare(
+                found[0], found[1], args.threshold, args.min_area_mm2, **options
+            )
+        )
+    except (OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except (KeyError, TypeError) as error:
+        print(
+            f"error: not the details file of mammo-seg evaluate --details: {error}",
+            file=sys.stderr,
+        )
+        return 1
+    setting = {"threshold": args.threshold, "min_area_mm2": args.min_area_mm2}
+    print(f"threshold {args.threshold}, minimum region {args.min_area_mm2} mm²")
+    print(format_result(result, [str(path) for path in paths]))
+    if args.output is not None:
+        content = {"inputs": [str(p) for p in paths], "setting": setting}
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(content | to_dict(result), indent=2) + "\n")
+        print(f"\nThe results are in {args.output}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in STEPS:
         return STEPS[arguments[0]][1](arguments[1:])
     args = build_parser().parse_args(arguments)
-    return _evaluate(args) if args.command == "evaluate" else _train(args)
+    commands = {"train": _train, "evaluate": _evaluate, "compare": _compare}
+    return commands[args.command](args)
 
 
 if __name__ == "__main__":
