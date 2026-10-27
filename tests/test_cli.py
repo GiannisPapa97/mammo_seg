@@ -6,6 +6,7 @@ from typing import Any, get_args
 import pytest
 from tests.data.manifests import make_manifest
 from tests.data.preprocessed import SETTINGS
+from tests.engine.test_bootstrap import EXAMPLE, many_patients
 from tests.project import Project, make_project
 
 from mammo_seg import cli
@@ -74,7 +75,7 @@ def test_the_help_lists_every_command(capsys: pytest.CaptureFixture[str]) -> Non
         cli.main(["--help"])
     assert stop.value.code == 0
     text = capsys.readouterr().out
-    for name in ("manifest", "splits", "masks", "preprocess", "train"):
+    for name in ("manifest", "splits", "masks", "preprocess", "train", "compare"):
         assert name in text
 
 
@@ -494,3 +495,88 @@ def test_scoring_the_test_set_says_it_should_be_done_once(
     out = capsys.readouterr().out
     assert "TEST SET: use this once" in out and "on the test images" in out
     assert (project.output / "evaluation_test.json").is_file()
+
+
+# --- compare ---
+
+
+def write_details(path: Path, content: dict[str, Any]) -> Path:
+    path.write_text(json.dumps(content))
+    return path
+
+
+SETTING_ARGS = ["--threshold", "0.5", "--min-area-mm2", "0"]
+
+
+def test_compare_prints_the_intervals_of_one_evaluation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    details = write_details(tmp_path / "details.json", EXAMPLE)
+    assert cli.main(["compare", str(details), *SETTING_ARGS, "--resamples", "50"]) == 0
+    text = capsys.readouterr().out
+    assert "threshold 0.5, minimum region 0.0 mm²" in text
+    assert "95% intervals from 50 draws of the 3 patients (5 images), seed 0" in text
+    assert "masses found              0.667 [" in text
+
+
+def test_compare_prints_the_paired_difference_of_two_and_writes_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = write_details(tmp_path / "a.json", many_patients(30, 0.3))
+    second = write_details(tmp_path / "b.json", many_patients(30, 0.7))
+    output = tmp_path / "out" / "comparison.json"
+    arguments = [str(first), str(second), *SETTING_ARGS, "--output", str(output)]
+    assert cli.main(["compare", *arguments]) == 0
+    text = capsys.readouterr().out
+    assert f"first: {first}\nsecond: {second}" in text
+    assert "higher" in next(
+        line for line in text.splitlines() if "masses found" in line
+    )
+    content = json.loads(output.read_text())
+    assert content["inputs"] == [str(first), str(second)]
+    assert content["setting"] == {"threshold": 0.5, "min_area_mm2": 0.0}
+    assert content["resamples"] == 2000 and content["seed"] == 0
+    assert content["difference"]["masses_found"]["low"] > 0
+
+
+def test_the_compare_defaults_are_those_of_the_bootstrap() -> None:
+    args = cli.build_parser().parse_args(["compare", "a.json", *SETTING_ARGS])
+    assert (args.resamples, args.seed, args.level) == (2000, 0, 0.95)
+    assert args.other is None
+
+
+def test_compare_needs_a_setting() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["compare", "a.json"])
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (EXAMPLE, "not in the details"),
+        ({"images": []}, "no images"),
+        ({"settings": []}, "not the details file"),
+        ([1, 2], "not the details file"),
+    ],
+)
+def test_bad_details_are_an_error_message(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    content: Any,
+    message: str,
+) -> None:
+    details = write_details(tmp_path / "details.json", content)
+    arguments = [str(details), "--threshold", "0.4", "--min-area-mm2", "10"]
+    assert cli.main(["compare", *arguments]) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_compare_reports_a_missing_or_broken_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["compare", str(tmp_path / "missing.json"), *SETTING_ARGS]) == 1
+    assert "missing.json" in capsys.readouterr().err
+    broken = tmp_path / "broken.json"
+    broken.write_text("{")
+    assert cli.main(["compare", str(broken), *SETTING_ARGS]) == 1
+    assert capsys.readouterr().err.startswith("error: ")
