@@ -1,6 +1,6 @@
 # Dataset: INbreast (Kaggle copy)
 
-Findings from `notebooks/01_data_exploration.ipynb` on the raw data in `data/raw/INbreast Release 1.0/`. Source: [ramanathansp20/inbreast-dataset](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) on Kaggle, which repackages the original INbreast Release 1.0 (Breast Research Group, INESC Porto).
+Findings from `notebooks/01_data_exploration.ipynb` on the raw data in `data/raw/inbreast/INbreast Release 1.0/`. Source: [ramanathansp20/inbreast-dataset](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) on Kaggle, which repackages the original INbreast Release 1.0 (Breast Research Group, INESC Porto).
 
 **Scope decision:** the project segments **masses only**. Calcifications are a different problem (see below) and are left for later.
 
@@ -126,7 +126,7 @@ Patients (108):
    - Left to chance: image size, view and the normal (BI-RADS 1) images.
    - There is no official split. A fixed held-out test set of about 20% of patients would hold only about 10 positive patients, so metrics from it are very noisy. Report cross-validation results and use a test set only as a sanity check.
 4. **Negatives matter.** Of the 410 images, 303 have no mass. Decide whether to train on positives only or on all images, and report lesion-positive and all-image metrics separately. Also report the 67 normal and the 236 other-lesion negatives separately, since they behave differently.
-5. **Masks must be derived.** Rasterize the polygons (clip to the image, merge multiple masses per image) and validate them. Keep the derived masks under `data/processed/`.
+5. **Masks must be derived.** Rasterize the polygons (clip to the image, merge multiple masses per image) and validate them. Keep the derived masks under `data/processed/inbreast/`.
 6. **Preprocessing:** one orientation for both breasts, cropping to the breast, a downscale to a longer side of 1024 px and intensity scaling from the 12-bit range. These are decided and implemented; see [data-pipeline.md](data-pipeline.md#4-preprocessing).
 7. **Grouping key:** patient id from the filename, never the file id.
 

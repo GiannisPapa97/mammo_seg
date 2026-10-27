@@ -2,7 +2,7 @@
 
 How the raw INbreast release is turned into training data. The facts about the raw data are in [dataset.md](dataset.md); this document describes the code. It grows as the pipeline steps are added.
 
-Raw data lives in `data/raw/` and is read-only. Everything derived goes to `data/processed/`. Both are git-ignored.
+Raw data lives in `data/raw/<dataset>/` and is read-only. Everything derived goes to `data/processed/<dataset>/`. Both are git-ignored. For INbreast these are `data/raw/inbreast/` and `data/processed/inbreast/`, the defaults of every step (`src/mammo_seg/data/paths.py`).
 
 ## 1. Manifest
 
@@ -12,7 +12,7 @@ Raw data lives in `data/raw/` and is read-only. Everything derived goes to `data
 uv run python -m mammo_seg.data.manifest
 ```
 
-By default it reads `data/raw/INbreast Release 1.0` and writes `data/processed/manifest.json`. Use `--dataset-dir` and `--output` to change them.
+By default it reads `data/raw/inbreast/INbreast Release 1.0` and writes `data/processed/inbreast/manifest.json`. Use `--dataset-dir` and `--output` to change them.
 
 Code, all in `src/mammo_seg/data/`:
 
@@ -109,7 +109,7 @@ Arguments:
 | `--folds K` | Number of cross-validation folds (required, at least 2) |
 | `--test-fraction F` | Share of patients to hold out as a test set, between 0 and 1. Off by default; without it all patients go into the folds |
 | `--seed N` | Random seed (default 0) |
-| `--manifest`, `--output` | Input manifest (default `data/processed/manifest.json`) and output file (default `data/processed/splits.json`) |
+| `--manifest`, `--output` | Input manifest (default `data/processed/inbreast/manifest.json`) and output file (default `data/processed/inbreast/splits.json`) |
 
 Code, in `src/mammo_seg/data/`: `strata.py` (the stratum of every patient), `splitting.py` (the stratified splitting of patients) and `splits.py` (splits from the manifest, the file format and the command).
 
@@ -190,7 +190,7 @@ Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; 
 uv run python -m mammo_seg.data.masks
 ```
 
-It reads `data/processed/manifest.json` and writes `data/processed/masks/<file_id>.png` for every image (`--manifest` and `--output-dir` change the paths). It takes about two minutes, mostly for writing the PNG files. Code: `src/mammo_seg/data/masks.py`.
+It reads `data/processed/inbreast/manifest.json` and writes `data/processed/inbreast/masks/<file_id>.png` for every image (`--manifest` and `--output-dir` change the paths). It takes about two minutes, mostly for writing the PNG files. Code: `src/mammo_seg/data/masks.py`.
 
 ### Format
 
@@ -273,7 +273,7 @@ Most images do not use the whole range. In the 410 preprocessed images the large
 
 ### Stored format
 
-Written to `data/processed/preprocessed/`:
+Written to `data/processed/inbreast/preprocessed/`:
 
 - `images/<file_id>.png`: the preprocessed image, 16-bit (values unchanged apart from the averaging of the rescale). The values stay in the 12-bit range 0 to 4095 of the scanner, about a sixteenth of what a 16-bit file can hold, so an image viewer that maps 0 to 65535 to black and white shows them dark and flat. Stretch the display range to 0 to 4095 to see them normally; the model is not affected, because the values are divided by 4095 when loaded
 - `masks/<file_id>.png`: its mass mask, 8-bit with the values 0 and 255 (read it with `read_mask`)
@@ -317,11 +317,13 @@ from mammo_seg.data.loaders import evaluation_loader, training_loader
 from mammo_seg.data.manifest import read_manifest
 from mammo_seg.data.splits import read_splits
 
-manifest = read_manifest(Path("data/processed/manifest.json"))
+manifest = read_manifest(Path("data/processed/inbreast/manifest.json"))
 ids = fold_ids(
-    manifest, read_splits(Path("data/processed/splits.json")), validation_fold=0
+    manifest,
+    read_splits(Path("data/processed/inbreast/splits.json")),
+    validation_fold=0,
 )
-data = Path("data/processed/preprocessed")
+data = Path("data/processed/inbreast/preprocessed")
 train = training_loader(
     MammogramDataset(data, ids.train, transform=Augmentation()), manifest, batch_size=8
 )

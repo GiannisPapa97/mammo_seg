@@ -23,6 +23,7 @@ import pydicom
 from pydantic import ValidationError
 
 from mammo_seg.data.annotations import read_rois
+from mammo_seg.data.paths import INBREAST_PROCESSED_DIR, INBREAST_RAW_DIR
 from mammo_seg.data.schema import (
     SCHEMA_VERSION,
     ImageRecord,
@@ -33,8 +34,8 @@ from mammo_seg.data.schema import (
     manifest_from_json,
 )
 
-DEFAULT_DATASET_DIR = Path("data/raw/INbreast Release 1.0")
-DEFAULT_OUTPUT = Path("data/processed/manifest.json")
+DEFAULT_DATASET_DIR = INBREAST_RAW_DIR
+DEFAULT_OUTPUT = INBREAST_PROCESSED_DIR / "manifest.json"
 
 IMAGE_COLUMNS = [
     "file_id",
