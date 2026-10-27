@@ -43,6 +43,8 @@ whole/evaluation_code_version.txt          # the commit of the details run
 whole/evaluation_details.log               # the log of the details run
 whole/fold_<k>/history.jsonl               # the training curves
 whole/fold_<k>/last.pt                     # the checkpoints, for notebooks/10_error_gallery.ipynb (download from Kaggle)
+whole/evaluation_training_fold0.json       # the training-set check: fold 0 on its own training images
+whole/evaluation_training_fold0_details.json
 patches/evaluation_validation.json
 patches/fold_<k>/history.jsonl
 ```
@@ -89,3 +91,42 @@ setting, but at a high threshold and at the cost of Dice. The folds vary a lot
 Next: whole images. Both designs find only 1 in 3 masses under 100 mm², and Dice
 in dense breasts is much lower; the per-image details are for analysing these
 errors.
+
+## Training-set check
+
+**Question:** are the small masses missed because 1024 is too coarse to show
+them, or because the model does not generalize to new ones? A model that cannot
+resolve small masses misses them on its own training images too.
+
+**How:** the whole design's fold 0 `last.pt` scored on its own 256 training
+images, with the evaluation code of commit
+`8c260fd94be746a8547a390f341e355d46ceb006`: `evaluate_model` with the default
+settings, whole-image inference, the same preprocessing as the training run.
+Locally on the CPU, 2026-10-27, from a script outside the repository; the
+output is in the details format, so notebooks 09 and 10 read it with `DETAILS`
+pointed at `whole/evaluation_training_fold0_details.json`.
+
+At threshold 0.4 and 10 mm², the fold 0 model on its training and its validation
+images:
+
+| | training (256 images) | validation (70 images) |
+|---|---|---|
+| masses under 100 mm² found | 19 of 20 (0.95) | 1 of 4 (0.25) |
+| masses of 100 mm² or more found | 60 of 60 (1.00) | 9 of 11 (0.82) |
+| Dice, images with a mass | 0.946 | 0.579 |
+| false alarms, images without a mass | 11 of 184 | 8 of 55 |
+| false regions per image | 0.047 | 0.143 |
+
+**Conclusion:** at 1024 the model finds and outlines small masses on images it
+was trained on, so the input is not too coarse for them; the misses in
+validation are mostly a failure to generalize, with a large gap between training
+and validation (Dice 0.95 against 0.58). Two limits: recognizing a mass seen
+about 100 times in training (60 epochs of 128 draws of the 72 images with a
+mass) is easier than recognizing a new one, so a higher resolution may still
+help somewhat; and this is one fold, with only 4 small
+masses in its validation fold (over all 5 folds, 8 of 24 are found).
+
+This lowers the expectation for 2048 and raises that for what counters
+overfitting: stronger augmentation, regularization, an earlier checkpoint, and
+more data (pretraining on another dataset). Drawing the few small-mass images
+more often may increase the memorizing rather than reduce it.
