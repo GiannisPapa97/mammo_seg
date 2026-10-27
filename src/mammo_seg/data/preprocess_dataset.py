@@ -6,7 +6,7 @@ the DICOMs on every epoch; inference runs the same ``preprocess`` function on th
 incoming image, so both see identical input. The intensity normalization is not
 applied here: the images keep their 16-bit values and are normalized when loaded.
 
-Output, in ``data/processed/preprocessed/`` by default:
+Output, in ``data/processed/inbreast/preprocessed/`` by default:
 
 - ``images/<file_id>.png``: the preprocessed image, 16-bit
 - ``masks/<file_id>.png``: its mass mask, 8-bit with the values 0 and 255
@@ -33,6 +33,7 @@ from scipy import ndimage
 
 from mammo_seg.data.manifest import read_manifest
 from mammo_seg.data.masks import mask_path, read_mask, write_mask
+from mammo_seg.data.paths import INBREAST_PROCESSED_DIR, INBREAST_RAW_DIR
 from mammo_seg.data.preprocessing import (
     DEFAULT_SIZE,
     Mask,
@@ -45,10 +46,10 @@ from mammo_seg.data.preprocessing import (
 )
 from mammo_seg.data.schema import FileId, Manifest
 
-DEFAULT_MANIFEST = Path("data/processed/manifest.json")
-DEFAULT_DATASET_DIR = Path("data/raw/INbreast Release 1.0")
-DEFAULT_MASKS_DIR = Path("data/processed/masks")
-DEFAULT_OUTPUT_DIR = Path("data/processed/preprocessed")
+DEFAULT_MANIFEST = INBREAST_PROCESSED_DIR / "manifest.json"
+DEFAULT_DATASET_DIR = INBREAST_RAW_DIR
+DEFAULT_MASKS_DIR = INBREAST_PROCESSED_DIR / "masks"
+DEFAULT_OUTPUT_DIR = INBREAST_PROCESSED_DIR / "preprocessed"
 RECORD_FILE = "preprocessing.json"
 RECORD_VERSION: Final = 1
 

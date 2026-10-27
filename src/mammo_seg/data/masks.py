@@ -10,7 +10,7 @@ the origin at the top-left corner, so the centre of pixel ``(row, column)`` is a
 polygon (even-odd rule). Polygons that leave the image are clipped to it.
 
 Masks are stored at the native image size as PNG files with the values 0 and 255,
-one per image, in ``data/processed/masks/<file_id>.png``. Writing them for the
+one per image, in ``data/processed/inbreast/masks/<file_id>.png``. Writing them for the
 whole manifest also checks every mask against its polygons and fails loudly.
 
 Run it with ``python -m mammo_seg.data.masks``.
@@ -28,10 +28,11 @@ import numpy.typing as npt
 from PIL import Image
 
 from mammo_seg.data.manifest import read_manifest
+from mammo_seg.data.paths import INBREAST_PROCESSED_DIR
 from mammo_seg.data.schema import LesionType, Manifest, Roi
 
-DEFAULT_MANIFEST = Path("data/processed/manifest.json")
-DEFAULT_OUTPUT_DIR = Path("data/processed/masks")
+DEFAULT_MANIFEST = INBREAST_PROCESSED_DIR / "manifest.json"
+DEFAULT_OUTPUT_DIR = INBREAST_PROCESSED_DIR / "masks"
 
 Mask = npt.NDArray[np.uint8]
 Shape = tuple[int, int]  # (rows, columns)

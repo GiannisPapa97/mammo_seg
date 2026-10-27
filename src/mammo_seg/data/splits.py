@@ -33,6 +33,7 @@ from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic.dataclasses import dataclass
 
 from mammo_seg.data.manifest import read_manifest
+from mammo_seg.data.paths import INBREAST_PROCESSED_DIR
 from mammo_seg.data.schema import ImageRecord, Manifest, View, image_to_json
 from mammo_seg.data.splitting import Patient, hold_out, stratified_folds
 from mammo_seg.data.strata import (
@@ -43,8 +44,8 @@ from mammo_seg.data.strata import (
     patient_profiles,
 )
 
-DEFAULT_MANIFEST = Path("data/processed/manifest.json")
-DEFAULT_OUTPUT = Path("data/processed/splits.json")
+DEFAULT_MANIFEST = INBREAST_PROCESSED_DIR / "manifest.json"
+DEFAULT_OUTPUT = INBREAST_PROCESSED_DIR / "splits.json"
 DEFAULT_SEED = 0
 SPLITS_VERSION: Final = 2  # 2: stratified on strata, which are stored
 _CONFIG = ConfigDict(strict=True, extra="forbid")

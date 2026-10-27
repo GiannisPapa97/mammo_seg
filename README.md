@@ -39,9 +39,9 @@ uv run pytest
 
 ## Data
 
-Datasets are not part of this repository. The `data/` directory is git-ignored; raw data goes in `data/raw/` and derived data in `data/processed/`.
+Datasets are not part of this repository. The `data/` directory is git-ignored and has one folder per dataset: raw data goes in `data/raw/<dataset>/` and derived data in `data/processed/<dataset>/`, for example `data/raw/inbreast/` and `data/processed/inbreast/`.
 
-To download and unzip the INbreast dataset (about 2 GB, about 9 GB unzipped) from its [Kaggle copy](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) into `data/raw/`:
+To download and unzip the INbreast dataset (about 2 GB, about 9 GB unzipped) from its [Kaggle copy](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) into `data/raw/inbreast/`:
 
 ```bash
 scripts/download_data.sh
@@ -49,25 +49,25 @@ scripts/download_data.sh
 
 It needs `curl` and `unzip`, resumes an interrupted download, and does nothing if the data is already there. The license of this copy is unclear, so do not redistribute the data. See [docs/dataset.md](docs/dataset.md) for what it contains.
 
-Then build the validated manifest (`data/processed/manifest.json`: every image with its metadata and lesions):
+Then build the validated manifest (`data/processed/inbreast/manifest.json`: every image with its metadata and lesions):
 
 ```bash
 uv run python -m mammo_seg.data.manifest
 ```
 
-Then make patient-level splits (`data/processed/splits.json`), stratified on masses, mass size and breast density, for example 5 folds with a 20% test set:
+Then make patient-level splits (`data/processed/inbreast/splits.json`), stratified on masses, mass size and breast density, for example 5 folds with a 20% test set:
 
 ```bash
 uv run python -m mammo_seg.data.splits --folds 5 --test-fraction 0.2
 ```
 
-Then write the mass masks (`data/processed/masks/<file_id>.png`, one per image):
+Then write the mass masks (`data/processed/inbreast/masks/<file_id>.png`, one per image):
 
 ```bash
 uv run python -m mammo_seg.data.masks
 ```
 
-Then preprocess the images once (crop to the breast, rescale to a longer side of 1024 px, flip right breasts), which writes `data/processed/preprocessed/`:
+Then preprocess the images once (crop to the breast, rescale to a longer side of 1024 px, flip right breasts), which writes `data/processed/inbreast/preprocessed/`:
 
 ```bash
 uv run python -m mammo_seg.data.preprocess_dataset

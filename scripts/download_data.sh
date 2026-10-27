@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Download and unzip the INbreast dataset (Kaggle copy) into data/raw/.
+# Download and unzip the INbreast dataset (Kaggle copy) into data/raw/inbreast/.
 #
 # Safe to run again: it skips the download when the zip is already complete and
 # the unzip when the dataset is already extracted. The data is not part of this
 # repository and its license is unclear, so do not redistribute it.
 #
 # Environment variables (mainly for testing):
-#   DATA_RAW_DIR          target directory (default: <repo>/data/raw)
+#   DATA_RAW_DIR          target directory (default: <repo>/data/raw/inbreast)
 #   INBREAST_URL          download URL
 #   INBREAST_ZIP_BYTES    expected size of the zip in bytes
 #   INBREAST_DCM_COUNT    expected number of DICOM files after unzipping
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-raw_dir="${DATA_RAW_DIR:-$repo_root/data/raw}"
+raw_dir="${DATA_RAW_DIR:-$repo_root/data/raw/inbreast}"
 url="${INBREAST_URL:-https://www.kaggle.com/api/v1/datasets/download/ramanathansp20/inbreast-dataset}"
 expected_bytes="${INBREAST_ZIP_BYTES:-2074630259}"
 expected_dcm="${INBREAST_DCM_COUNT:-410}"
