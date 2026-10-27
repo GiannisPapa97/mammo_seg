@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 import torch
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from tests.data.manifests import make_manifest
 from tests.data.preprocessed import SETTINGS, write_preprocessed_for
 
@@ -128,6 +128,9 @@ def test_every_group_and_metric_can_be_selected(name: str) -> None:
         {"batch_size": 0},
         {"learning_rate": 0.0},
         {"positive_fraction": 1.0},
+        {"small_mass_fraction": 0.0},
+        {"small_mass_fraction": 1.0},
+        {"positive_fraction": None, "small_mass_fraction": 0.5},
         {"samples_per_epoch": 0},
         {"num_workers": -1},
         {"seed": -1},
@@ -698,6 +701,7 @@ def test_a_checkpoint_without_training_state_cannot_be_resumed(
         ),
         ({"preprocessing_settings": PreprocessingSettings(size=32)}, "preprocessed"),
         ({"metadata": {"fold": 1}}, "fold = 0, not 1"),
+        ({"settings": replace(FAST, small_mass_fraction=0.5)}, "small_mass_fraction"),
     ],
 )
 def test_a_run_is_only_resumed_with_the_settings_it_started_with(
@@ -707,6 +711,21 @@ def test_a_run_is_only_resumed_with_the_settings_it_started_with(
     options = {"settings": FAST, "metadata": {"fold": 0}, **options}
     with pytest.raises(ValueError, match=message):
         run_fit(data, output_dir=tmp_path, resume=True, **options)
+
+
+def test_settings_saved_before_the_small_mass_fraction_still_load() -> None:
+    adapter = TypeAdapter(TrainingSettings)
+    saved = json.loads(adapter.dump_json(FAST))
+    del saved["small_mass_fraction"]
+    assert adapter.validate_json(json.dumps(saved)) == FAST
+
+
+def test_a_small_mass_fraction_needs_the_sampler_without_a_composition() -> None:
+    TrainingSettings(small_mass_fraction=0.5)
+    with pytest.raises(ValidationError, match="needs the sampler"):
+        TrainingSettings(
+            batch_size=8, composition=BatchComposition(), small_mass_fraction=0.5
+        )
 
 
 # --- a fold ---
@@ -733,6 +752,31 @@ def test_a_fold_trains_on_the_other_folds_and_validates_on_its_own(
         "fold 1 on cpu: 8 training and 8 validation images, validated in one pass"
         in caplog.messages
     )
+
+
+def test_a_fold_draws_with_its_small_mass_fraction(
+    data: Data, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = []
+
+    def stop(*args: Any) -> None:
+        seen.append(args[-1])  # the small-mass fraction comes last
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(train_module, "training_loader", stop)
+    with pytest.raises(RuntimeError, match="stop"):
+        train_fold(
+            data.manifest,
+            data.splits_file,
+            data.directory,
+            fold=1,
+            settings=replace(FAST, small_mass_fraction=0.6),
+            model_settings=TINY,
+            preprocessing_settings=SETTINGS,
+            device=CPU,
+            canvas=CANVAS,
+        )
+    assert seen == [0.6]
 
 
 class Bright(torch.nn.Module):

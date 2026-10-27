@@ -6,6 +6,12 @@ draws with replacement, so an epoch has a fixed length, by default the number of
 training images. Validation and test loaders keep the natural distribution and
 the original order: their metrics have to reflect the real data.
 
+Among the images with a mass, ``small_mass_fraction`` can also set the share of
+those with a small mass (one smaller than 100 mm², measured on its polygon at the
+native pixel size, as the splits measure it): about 28% of the training images with
+a mass have one, and drawing them more often shows the model more of the masses it
+misses most. Without it, every image with a mass is equally likely, as before.
+
 Training can instead build every batch from a ``BatchComposition``: so many patches
 that contain a mass, so many negative patches from images with a mass and so many
 from images without one. A batch then always has the same make-up, where random
@@ -33,7 +39,8 @@ from torch.utils.data import DataLoader, Sampler, WeightedRandomSampler
 
 from mammo_seg.data.augmentation import PatchKind
 from mammo_seg.data.dataset import DEFAULT_MULTIPLE, MammogramDataset, Sample
-from mammo_seg.data.schema import Manifest
+from mammo_seg.data.schema import LesionType, Manifest
+from mammo_seg.data.strata import DEFAULT_SMALL_MASS_MM2, area_mm2
 
 DEFAULT_POSITIVE_FRACTION = 0.5
 
@@ -47,21 +54,48 @@ def has_mass_of(manifest: Manifest, file_ids: Sequence[str]) -> list[bool]:
     return [by_id[file_id] for file_id in file_ids]
 
 
+def has_small_mass_of(
+    manifest: Manifest,
+    file_ids: Sequence[str],
+    small_mass_mm2: float = DEFAULT_SMALL_MASS_MM2,
+) -> list[bool]:
+    """Whether each image has a mass smaller than ``small_mass_mm2``, by the area of
+    its polygon at the native pixel size, in the order of ``file_ids``."""
+    by_id = {image.file_id: image for image in manifest.images}
+    missing = sorted(set(file_ids) - by_id.keys())
+    if missing:
+        raise ValueError(f"images not in the manifest: {missing}")
+    return [
+        any(
+            roi.lesion_type is LesionType.MASS and area_mm2(roi) < small_mass_mm2
+            for roi in by_id[file_id].rois
+        )
+        for file_id in file_ids
+    ]
+
+
+def _check_fraction(name: str, fraction: float) -> None:
+    if not 0 < fraction < 1:
+        raise ValueError(f"the {name} must be between 0 and 1, got {fraction}")
+
+
 def balanced_sampler(
     has_mass: Sequence[bool],
     positive_fraction: float = DEFAULT_POSITIVE_FRACTION,
     num_samples: int | None = None,
     generator: torch.Generator | None = None,
+    has_small_mass: Sequence[bool] | None = None,
+    small_mass_fraction: float | None = None,
 ) -> WeightedRandomSampler:
-    """Draw indices so that about ``positive_fraction`` of them have a mass.
+    """Draw indices so that about ``positive_fraction`` of them have a mass and,
+    with a ``small_mass_fraction``, about that share of those have a small mass
+    (``has_small_mass``, which an image without a mass never has).
 
-    Raises ValueError for a fraction outside (0, 1) or when there are no positive
-    or no negative images to balance.
+    Raises ValueError for a fraction outside (0, 1), when there are no positive or
+    no negative images to balance, or no images with a mass with and without a
+    small one, or for a small-mass fraction without the small masses.
     """
-    if not 0 < positive_fraction < 1:
-        raise ValueError(
-            f"the positive fraction must be between 0 and 1, got {positive_fraction}"
-        )
+    _check_fraction("positive fraction", positive_fraction)
     positives = sum(has_mass)
     negatives = len(has_mass) - positives
     if positives == 0 or negatives == 0:
@@ -72,6 +106,29 @@ def balanced_sampler(
         positive_fraction / positives if flag else (1 - positive_fraction) / negatives
         for flag in has_mass
     ]
+    if small_mass_fraction is not None:
+        if has_small_mass is None or len(has_small_mass) != len(has_mass):
+            raise ValueError(
+                "a small-mass fraction needs the small mass of every image"
+            )
+        _check_fraction("small-mass fraction", small_mass_fraction)
+        small = [
+            mass and tiny for mass, tiny in zip(has_mass, has_small_mass, strict=True)
+        ]
+        smalls = sum(small)
+        if smalls == 0 or smalls == positives:
+            raise ValueError(
+                f"cannot balance {smalls} images with a small mass and "
+                f"{positives - smalls} with only larger ones"
+            )
+        share = {
+            True: positive_fraction * small_mass_fraction / smalls,
+            False: positive_fraction * (1 - small_mass_fraction) / (positives - smalls),
+        }
+        weights = [
+            share[tiny] if mass else weight
+            for mass, tiny, weight in zip(has_mass, small, weights, strict=True)
+        ]
     return WeightedRandomSampler(
         weights,
         num_samples=num_samples if num_samples is not None else len(has_mass),
@@ -172,8 +229,11 @@ def training_loader(
     num_workers: int = 0,
     seed: int = 0,
     composition: BatchComposition | None = None,
+    small_mass_fraction: float | None = None,
 ) -> DataLoader[Sample]:
-    """Batches for training, balanced by the sampler (``None`` turns it off).
+    """Batches for training, balanced by the sampler (``None`` turns it off), with
+    the share ``small_mass_fraction`` of small masses among the images with a mass
+    if given (see ``balanced_sampler``).
 
     Without the sampler, every image is used once per epoch in a shuffled order.
     The last incomplete batch is dropped, so batch normalization never sees a
@@ -183,8 +243,15 @@ def training_loader(
     ``TypedBatchSampler``) and ``positive_fraction`` is not used; the dataset must
     cut patches. ``batch_size`` must equal the size of the composition, and an
     epoch has ``samples_per_epoch // batch_size`` batches. Raises ValueError
-    otherwise.
+    otherwise, and for a small-mass fraction with a composition or without the
+    sampler.
     """
+    if small_mass_fraction is not None and (
+        composition is not None or positive_fraction is None
+    ):
+        raise ValueError(
+            "a small-mass fraction needs the sampler, without a batch composition"
+        )
     generator = torch.Generator().manual_seed(seed)
     if composition is not None:
         if composition.size != batch_size:
@@ -212,6 +279,12 @@ def training_loader(
             positive_fraction,
             samples_per_epoch,
             generator,
+            (
+                has_small_mass_of(manifest, dataset.file_ids)
+                if small_mass_fraction is not None
+                else None
+            ),
+            small_mass_fraction,
         )
     return DataLoader(
         dataset,
