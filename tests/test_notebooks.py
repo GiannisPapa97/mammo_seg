@@ -17,6 +17,8 @@ EVALUATION = Path("notebooks/06_kaggle_evaluation.ipynb")
 COMPARISON = Path("notebooks/08_kaggle_whole_vs_patches.ipynb")
 ERRORS = Path("notebooks/09_error_analysis.ipynb")
 GALLERY = Path("notebooks/10_error_gallery.ipynb")
+COLAB = Path("notebooks/11_colab_training.ipynb")
+COLAB_EVALUATION = Path("notebooks/12_colab_evaluation.ipynb")
 DATA_STEPS = {"manifest", "splits", "masks", "preprocess"}
 
 
@@ -143,7 +145,9 @@ def test_the_options_of_the_notebook_cannot_override_the_fold_or_the_time() -> N
 
 
 @pytest.mark.parametrize(
-    "notebook", [KAGGLE, EVALUATION, COMPARISON], ids=lambda p: p.name
+    "notebook",
+    [KAGGLE, EVALUATION, COMPARISON, COLAB, COLAB_EVALUATION],
+    ids=lambda p: p.name,
 )
 def test_the_repository_is_not_cloned_where_it_would_hide_the_package(
     notebook: Path,
@@ -225,3 +229,73 @@ def test_the_error_gallery_shows_a_setting_the_evaluation_tries() -> None:
     # The gallery groups the false regions as the error analysis does.
     analysis = settings_of(ERRORS, "NEAR_MM", "CHEST_WALL")
     assert {k: settings[k] for k in analysis} == analysis
+
+
+@pytest.mark.parametrize(
+    ("notebook", "step"),
+    [(COLAB, "train"), (COLAB_EVALUATION, "evaluate")],
+    ids=lambda value: value.name if isinstance(value, Path) else "",
+)
+def test_the_colab_notebooks_use_options_that_exist(
+    notebook: Path, step: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mammo_seg = [c for c in commands(notebook) if c.startswith("mammo-seg ")]
+    # The data comes from the archive: no data step runs on Colab.
+    assert [c.split()[1] for c in mammo_seg] == [step]
+    used = set(re.findall(r"--[a-z][a-z-]*", mammo_seg[0]))
+    assert used <= options_of(step, capsys), mammo_seg[0]
+
+
+def test_the_colab_notebook_settings_are_valid() -> None:
+    training = settings_of(COLAB, "FOLDS", "TRAIN_OPTIONS")
+    assert training["FOLDS"] and set(training["FOLDS"]) <= set(range(5))
+    cli.build_parser().parse_args(["train", *shlex.split(training["TRAIN_OPTIONS"])])
+    evaluation = settings_of(COLAB_EVALUATION, "FOLDS", "EVALUATE_OPTIONS")
+    assert evaluation["FOLDS"] and set(evaluation["FOLDS"]) <= set(range(5))
+    cli.build_parser().parse_args(
+        ["evaluate", *shlex.split(evaluation["EVALUATE_OPTIONS"])]
+    )
+
+
+def test_the_colab_training_and_evaluation_read_the_same_data_and_runs() -> None:
+    names = ("DATA_ARCHIVE", "RUN_NAME")
+    assert settings_of(COLAB, *names) == settings_of(COLAB_EVALUATION, *names)
+    for notebook in (COLAB, COLAB_EVALUATION):
+        code = "".join("".join(c["source"]) for c in read(notebook)["cells"])
+        assert 'DRIVE_DIR = Path("/content/drive/MyDrive/' in code
+
+
+@pytest.mark.parametrize("notebook", [COLAB, COLAB_EVALUATION], ids=lambda p: p.name)
+def test_a_colab_notebook_keeps_its_runs_on_drive(notebook: Path) -> None:
+    # A session can end at any time and /content goes with it; Drive stays.
+    code = "".join("".join(c["source"]) for c in read(notebook)["cells"])
+    assert 'RUNS = DRIVE_DIR / "mammo_seg_runs" / RUN_NAME' in code
+    (command,) = [c for c in commands(notebook) if c.startswith("mammo-seg ")]
+    folder = "--output-dir" if notebook == COLAB else "--runs-dir"
+    assert f'{folder} "{{RUNS}}"' in command
+    assert "drive.flush_and_unmount()" in code
+
+
+def test_the_colab_options_cannot_override_the_fold_or_the_time() -> None:
+    (train,) = [c for c in commands(COLAB) if c.startswith("mammo-seg train ")]
+    assert train.index("{TRAIN_OPTIONS}") < train.index("--fold {fold}")
+    assert train.index("{TRAIN_OPTIONS}") < train.index("--max-minutes {minutes}")
+    (evaluate,) = [
+        c for c in commands(COLAB_EVALUATION) if c.startswith("mammo-seg evaluate ")
+    ]
+    assert evaluate.index("{EVALUATE_OPTIONS}") < evaluate.index("--folds {folds}")
+    assert '--output "{OUTPUT}"' in evaluate
+
+
+@pytest.mark.parametrize(
+    ("notebook", "name"),
+    [(COLAB, "code_version.txt"), (COLAB_EVALUATION, "evaluation_code_version.txt")],
+    ids=lambda value: value.name if isinstance(value, Path) else value,
+)
+def test_a_colab_notebook_records_the_commit_of_its_code(
+    notebook: Path, name: str
+) -> None:
+    recorded = [c for c in commands(notebook) if "rev-parse HEAD" in c]
+    assert len(recorded) == 1 and 'tee -a "{VERSION}"' in recorded[0]
+    code = "".join("".join(c["source"]) for c in read(notebook)["cells"])
+    assert f'VERSION = RUNS / "{name}"' in code
