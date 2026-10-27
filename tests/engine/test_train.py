@@ -112,6 +112,7 @@ def test_the_default_settings_are_the_agreed_ones() -> None:
     assert settings.epochs == 60 and settings.batch_size == 4
     assert settings.learning_rate == 1e-4 and settings.positive_fraction == 0.5
     assert settings.amp and settings.selection_metric == "all_images.dice"
+    assert settings.weight_decay == 0
 
 
 @pytest.mark.parametrize("name", SELECTION_METRICS)
@@ -127,6 +128,7 @@ def test_every_group_and_metric_can_be_selected(name: str) -> None:
         {"epochs": 0},
         {"batch_size": 0},
         {"learning_rate": 0.0},
+        {"weight_decay": -0.01},
         {"positive_fraction": 1.0},
         {"small_mass_fraction": 0.0},
         {"small_mass_fraction": 1.0},
@@ -425,6 +427,39 @@ def test_fit_runs_the_epochs_validates_and_writes_the_history(
     assert result.stop_reason == "finished"
 
 
+def test_adamw_without_weight_decay_makes_the_steps_of_adam() -> None:
+    # So runs without weight decay train exactly as those from before AdamW.
+    torch.manual_seed(0)
+    first = torch.nn.Linear(8, 2)
+    second = torch.nn.Linear(8, 2)
+    second.load_state_dict(first.state_dict())
+    adam = torch.optim.Adam(first.parameters(), lr=1e-2)
+    adamw = torch.optim.AdamW(second.parameters(), lr=1e-2, weight_decay=0.0)
+    inputs = torch.randn(16, 8)
+    for _ in range(5):
+        for model, optimizer in ((first, adam), (second, adamw)):
+            optimizer.zero_grad()
+            model(inputs).square().mean().backward()
+            optimizer.step()
+    assert all(
+        torch.equal(a, b)
+        for a, b in zip(first.parameters(), second.parameters(), strict=True)
+    )
+
+
+def test_weight_decay_shrinks_the_weights(data: Data, tmp_path: Path) -> None:
+    def weight_norm(settings: TrainingSettings, output: Path) -> float:
+        run_fit(data, settings, output)
+        weights = load_checkpoint(output / LAST_FILE).model_state.values()
+        return sum(float(w.float().square().sum()) for w in weights)
+
+    plain = weight_norm(FAST, tmp_path / "plain")
+    decayed = weight_norm(replace(FAST, weight_decay=50.0), tmp_path / "decayed")
+    # The 6 steps, at learning rates of 1e-3 falling along the cosine, multiply
+    # every weight by about 0.84 in all, so the sum of squares by about 0.70.
+    assert decayed < 0.9 * plain
+
+
 def test_the_learning_rate_follows_a_cosine_down_to_zero(data: Data) -> None:
     result = run_fit(data, replace(FAST, epochs=4, learning_rate=1e-3))
     rates = [r.learning_rate for r in result.history]
@@ -702,6 +737,7 @@ def test_a_checkpoint_without_training_state_cannot_be_resumed(
         ({"preprocessing_settings": PreprocessingSettings(size=32)}, "preprocessed"),
         ({"metadata": {"fold": 1}}, "fold = 0, not 1"),
         ({"settings": replace(FAST, small_mass_fraction=0.5)}, "small_mass_fraction"),
+        ({"settings": replace(FAST, weight_decay=0.01)}, "weight_decay: 0.0 -> 0.01"),
     ],
 )
 def test_a_run_is_only_resumed_with_the_settings_it_started_with(
@@ -713,10 +749,11 @@ def test_a_run_is_only_resumed_with_the_settings_it_started_with(
         run_fit(data, output_dir=tmp_path, resume=True, **options)
 
 
-def test_settings_saved_before_the_small_mass_fraction_still_load() -> None:
+@pytest.mark.parametrize("added_later", ["small_mass_fraction", "weight_decay"])
+def test_settings_saved_before_a_setting_was_added_still_load(added_later: str) -> None:
     adapter = TypeAdapter(TrainingSettings)
     saved = json.loads(adapter.dump_json(FAST))
-    del saved["small_mass_fraction"]
+    del saved[added_later]
     assert adapter.validate_json(json.dumps(saved)) == FAST
 
 
@@ -942,7 +979,13 @@ def test_a_fold_trains_on_crops_and_validates_on_whole_images(
     assert result.history[0].validation.all_images.images == 8
 
 
-def test_a_run_is_not_resumed_with_other_crops(data: Data, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "other",
+    [AugmentationSettings(crop_size=(48, 48)), replace(CROPS, elastic=2.0)],
+)
+def test_a_run_is_not_resumed_with_other_augmentation(
+    data: Data, tmp_path: Path, other: AugmentationSettings
+) -> None:
     def run(augmentation: AugmentationSettings, **options: Any) -> TrainingResult:
         return train_fold(
             data.manifest,
@@ -961,7 +1004,7 @@ def test_a_run_is_not_resumed_with_other_crops(data: Data, tmp_path: Path) -> No
 
     run(CROPS, time_limit_minutes=1e-9)
     with pytest.raises(ValueError, match="augmentation"):
-        run(AugmentationSettings(crop_size=(48, 48)), resume=True)
+        run(other, resume=True)
     assert run(CROPS, resume=True).stop_reason == "finished"
 
 

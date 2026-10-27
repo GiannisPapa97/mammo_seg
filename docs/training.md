@@ -90,13 +90,15 @@ The model code runs the same on a CPU and on a GPU, so tests and smoke runs happ
 - **Safe:** it is loaded with `weights_only=True`, so a checkpoint downloaded from somewhere cannot run code. Settings are stored as JSON text and everything else is tensors and plain values.
 - **Self-contained:** `load_model(path, device)` rebuilds the network without downloading pretrained weights, puts it in evaluation mode and returns it with the preprocessing settings that images must be given at inference.
 
-A checkpoint is about 100 MB of weights for the default model, and about 300 MB with the Adam optimizer state.
+A checkpoint is about 100 MB of weights for the default model, and about 300 MB with the optimizer state (AdamW).
 
 ## 4. The training loop
 
 `train_fold(manifest, splits_file, preprocessed_dir, fold, ...)` (`engine/train.py`) trains on every fold of the patient-level splits but one and validates on that one. Each epoch is a pass of training and a pass of validation:
 
-- **Training** draws batches balanced between images with and without a mass (the sampler of `loaders.py`, 50% by default), applies the augmentation, and minimizes the Dice + cross-entropy loss with Adam, on every pixel including the padding (section 2). The learning rate starts at 1e-4 and follows a cosine curve down to 0 over the epochs.
+- **Training** draws batches balanced between images with and without a mass (the sampler of `loaders.py`, 50% by default), applies the augmentation, and minimizes the Dice + cross-entropy loss with AdamW, on every pixel including the padding (section 2). The learning rate starts at 1e-4 and follows a cosine curve down to 0 over the epochs.
+- **Weight decay** (`--weight-decay W`, 0 by default): AdamW is Adam with a decoupled weight decay, which multiplies every weight by 1 - learning rate × W at each step, a regularization against overfitting. It applies to all weights, the biases and normalization layers too. At 0, AdamW makes exactly the steps of Adam (a test checks this), so runs without it train as before. At the learning rate of 1e-4, W = 0.01 shrinks a weight by 1e-6 per step, so a noticeable effect needs larger values.
+- **Augmentation** (`--rotation`, `--scale`, `--shift`, `--brightness`, `--contrast`, `--gamma`, `--noise`, `--elastic`, `--elastic-spacing`): the random changes of the training images, described in [data-pipeline.md](data-pipeline.md); the defaults are mild and the elastic deformation is off.
 - **Crops** (`--crop-size N`, off by default): training can use square patches of N pixels instead of whole images, half of them (`--crop-mass-fraction`) placed around a mass when the image has one (see the augmentation in [data-pipeline.md](data-pipeline.md)). The training canvas is then the crop size rounded up to a multiple of 32, so batches are cheaper and a larger `--batch-size` fits. Validation scores whole images either way, but a model trained on crops predicts them in sliding windows of the training canvas (see *How a whole image is predicted* below). The crop settings are saved in the checkpoint, and a run cannot be resumed with other ones.
 - **Small masses** (`--small-mass-fraction F`, off by default): among the images with a mass, about F of the draws are images with a small mass (one under 100 mm², measured on its polygon at the native pixel size, as the splits measure it), instead of the natural share of about 0.28 (18 to 20 of the 67 to 72 training images with a mass of each fold). The share of images with a mass stays at `positive_fraction`. At 0.5, each image with a small mass is drawn about 1.8 times as often. It needs the sampler and cannot be combined with `--batch-composition`. Off, the draws are exactly those of earlier runs.
 - **Batch composition** (`--batch-composition MASS NEG_FROM_MASS_IMAGES NEG_FROM_NORMAL_IMAGES`, for example `4 2 2`, needs `--crop-size`): instead of drawing images at random, every batch has that many patches that contain a mass, negative patches (no mass) from images with a mass, and negative patches from images without one. The batch size is their sum, `--positive-fraction` is not used, and the composition is saved in the checkpoint like the other settings, so a run cannot be resumed with another one. Patch kinds are described in [data-pipeline.md](data-pipeline.md). The negative patches of images with a mass are only mostly negative: when no patch avoids the mass, the one with the least of it is used, which happened for about a fifth of them on fold 0 at 512 px (a median of 0.23% of the patch), so about 55% of all patches hold mass pixels, not 50%. Implemented and tested on synthetic data; not yet run on the real data.
@@ -114,6 +116,7 @@ A checkpoint is about 100 MB of weights for the default model, and about 300 MB 
 | `epochs` | 60 |
 | `batch_size` | 4 |
 | `learning_rate` | 1e-4 (cosine decay) |
+| `weight_decay` | 0 (AdamW without decay, the same as Adam) |
 | `positive_fraction` | 0.5 |
 | `small_mass_fraction` | none (the natural share of about 0.28) |
 | `composition` | none (4 2 2 with `--batch-composition 4 2 2`) |
@@ -139,7 +142,7 @@ Both are written atomically (section 3).
 
 A run stops when the epochs are done, when the selection metric has not improved for `patience` epochs, or, with `--max-minutes`, before an epoch that would not end within that time, so a session with a time limit ends with a saved state instead of a lost epoch. At least one epoch always runs, so repeated sessions make progress.
 
-`--resume` continues from `last.pt`. It refuses a checkpoint made with other training settings, model, preprocessing or fold (only mixed precision may differ), so a run is never continued with something else than it started with. The number of workers must stay the same too: the workers share the samples of an epoch, so their number changes the random draws.
+`--resume` continues from `last.pt`. It refuses a checkpoint made with other training settings, model, preprocessing or fold (only mixed precision may differ), so a run is never continued with something else than it started with. The number of workers must stay the same too: the workers share the samples of an epoch, so their number changes the random draws. A run started before the elastic deformation was added cannot be resumed with the code that has it: its saved augmentation settings lack the two elastic settings, so they differ; finish it with the code it started with.
 
 The random draws of an epoch (the sampler and the augmentation) depend only on the seed, the epoch number and the number of workers, so a stopped and resumed run gives the same history and weights as one that was never stopped; tests check this on the CPU with no workers and with two. Two things make it hold:
 

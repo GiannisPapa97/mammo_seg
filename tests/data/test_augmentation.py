@@ -12,6 +12,8 @@ from mammo_seg.data.augmentation import (
     Augmentation,
     AugmentationSettings,
     PatchKind,
+    elastic,
+    elastic_displacement,
 )
 from mammo_seg.data.dataset import MammogramDataset
 
@@ -162,6 +164,52 @@ def test_there_is_no_flip() -> None:
     ]
     flips = (v2.RandomHorizontalFlip, v2.RandomVerticalFlip)
     assert not any(isinstance(transform, flips) for transform in transforms)
+
+
+def test_the_elastic_deformation_is_off_by_default() -> None:
+    settings = AugmentationSettings()
+    assert settings.elastic == 0 and settings.elastic_spacing == 64
+
+
+def test_the_elastic_deformation_bends_the_mask_with_the_image() -> None:
+    bend = replace(NOTHING, elastic=2.0, elastic_spacing=16)
+    changed = 0
+    for seed in range(10):
+        torch.manual_seed(seed)
+        image, mask = Augmentation(bend)(*lesion_sample())
+        assert ((mask == 0) | (mask == 1)).all()
+        assert overlap(image[0] > 0.6, mask[0] > 0.5) > 0.85
+        changed += not torch.equal(mask, lesion_sample()[1])
+    assert changed == 10
+
+
+def test_the_elastic_displacement_has_the_asked_size_and_is_smooth() -> None:
+    torch.manual_seed(0)
+    shift = torch.stack([elastic_displacement(256, 200, 4.0, 32) for _ in range(20)])
+    assert shift.shape == (20, 2, 256, 200)
+    # Bicubic interpolation between the control points lowers the spread a little.
+    assert 0.7 * 4.0 < float(shift.std()) < 4.0
+    # Neighbouring pixels move almost alike: a smooth bend, not noise, for which
+    # their difference would spread 1.4 times as much as the displacement itself.
+    neighbours = float((shift[..., 1:] - shift[..., :-1]).std())
+    assert neighbours < 0.1 * float(shift.std())
+
+
+def test_the_area_brought_in_by_the_elastic_deformation_stays_zero() -> None:
+    image = torch.full((1, 64, 48), 0.4)
+    torch.manual_seed(3)
+    bent, _ = elastic(image, torch.zeros(1, 64, 48), strength=3.0, spacing=16)
+    assert (bent == 0).any()  # some border pixels come from outside the image
+    assert bent.min() >= 0 and bent.max() <= 0.4 + 1e-6
+    # Away from the borders a flat image stays flat: nothing is invented.
+    assert torch.allclose(bent[0, 16:48, 12:36], torch.tensor(0.4))
+
+
+def test_a_strong_elastic_deformation_keeps_the_mask_binary() -> None:
+    # Values in between would mean a mask that was interpolated.
+    torch.manual_seed(0)
+    _, mask = elastic(*lesion_sample(), strength=10.0, spacing=8)
+    assert ((mask == 0) | (mask == 1)).all() and mask.sum() > 0
 
 
 def test_the_same_seed_gives_the_same_result() -> None:
@@ -406,6 +454,8 @@ def test_a_kind_needs_a_crop_size(kind: PatchKind) -> None:
         {"brightness": 1.0},
         {"gamma": -0.1},
         {"noise": -0.01},
+        {"elastic": -1.0},
+        {"elastic_spacing": 1},
         {"crop_size": (0, 10)},
         {"crop_mass_fraction": -0.1},
         {"crop_mass_fraction": 1.1},

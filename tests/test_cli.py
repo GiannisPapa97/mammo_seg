@@ -10,12 +10,13 @@ from tests.engine.test_bootstrap import EXAMPLE, many_patients
 from tests.project import Project, make_project
 
 from mammo_seg import cli
+from mammo_seg.data.augmentation import AugmentationSettings
 from mammo_seg.data.loaders import BatchComposition
 from mammo_seg.data.manifest import write_manifest
 from mammo_seg.data.splits import create_splits_file, write_splits
 from mammo_seg.engine import evaluate as evaluate_module
 from mammo_seg.engine import train as train_module
-from mammo_seg.engine.checkpoint import save_checkpoint
+from mammo_seg.engine.checkpoint import load_checkpoint, save_checkpoint
 from mammo_seg.engine.inference import INFERENCES
 from mammo_seg.engine.model import Architecture, ModelSettings, build_model
 from mammo_seg.engine.train import SELECTION_METRICS, TrainingResult
@@ -284,6 +285,56 @@ def test_a_run_with_a_batch_composition_trains(
     assert cli.main(project.train_args(*options, "--no-amp", *TINY)) == 0
     assert "Training ended after 1 epochs (finished)" in capsys.readouterr().out
     assert (project.output / "fold_0" / "last.pt").is_file()
+
+
+def test_the_augmentation_defaults_are_those_of_the_settings() -> None:
+    defaults = AugmentationSettings()
+    for name, (kind, default, _) in cli.AUGMENTATION_OPTIONS.items():
+        assert getattr(defaults, name) == default and type(default) is kind
+    args = cli.build_parser().parse_args(["train"])
+    for name in cli.AUGMENTATION_OPTIONS:
+        assert getattr(args, name) == getattr(defaults, name)
+    assert args.weight_decay == 0
+
+
+def test_the_augmentation_and_weight_decay_options_reach_the_training(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def fake(*args: Any, **kwargs: Any) -> TrainingResult:
+        calls.append(args)
+        return result()
+
+    monkeypatch.setattr(train_module, "train_fold", fake)
+    options = ["--rotation", "20", "--scale", "0.25", "--gamma", "0.3"]
+    options += ["--elastic", "4", "--elastic-spacing", "32", "--noise", "0"]
+    options += ["--weight-decay", "0.01", *TINY]
+    assert cli.main(project.train_args(*options)) == 0
+    settings, augmentation = calls[0][4], calls[0][7]
+    assert settings.weight_decay == 0.01
+    assert augmentation == AugmentationSettings(
+        rotation=20.0, scale=0.25, gamma=0.3, elastic=4.0, elastic_spacing=32, noise=0.0
+    )
+
+
+def test_a_run_with_elastic_deformation_and_weight_decay_trains(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = ["--elastic", "2", "--elastic-spacing", "8", "--weight-decay", "0.01"]
+    options += ["--epochs", "1", "--no-amp", *TINY]
+    assert cli.main(project.train_args(*options)) == 0
+    assert "Training ended after 1 epochs (finished)" in capsys.readouterr().out
+    metadata = load_checkpoint(project.output / "fold_0" / "last.pt").metadata
+    assert json.loads(metadata["augmentation"])["elastic"] == 2.0
+    assert json.loads(metadata["training_settings"])["weight_decay"] == 0.01
+
+
+def test_an_invalid_augmentation_is_an_error(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(project.train_args("--elastic", "-1", *TINY)) == 1
+    assert capsys.readouterr().err.startswith("error:")
 
 
 def test_a_crop_size_of_zero_is_an_error(
