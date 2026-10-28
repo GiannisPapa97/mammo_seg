@@ -306,11 +306,47 @@ def test_validation_scores_every_image_and_leaves_the_weights_alone(
     model = build_model(TINY)
     before = {key: value.clone() for key, value in model.state_dict().items()}
     _, validation_loader = loaders(data)
-    result = validate(model, validation_loader, CPU, amp=False)
+    result, loss = validate(model, validation_loader, CPU, amp=False)
     assert result.all_images.images == 16
     assert result.with_mass.images == 4 and result.without_mass.images == 12
+    assert math.isfinite(loss) and loss > 0
     assert not model.training
     assert all(torch.equal(before[key], v) for key, v in model.state_dict().items())
+
+
+def test_the_validation_loss_is_the_training_loss_on_each_image(data: Data) -> None:
+    model = Constant(2.0)  # predicts a mass everywhere, the padding too
+    # Batches of 3 of the 16 images: the last batch has one image.
+    _, validation_loader = loaders(data, replace(FAST, batch_size=3))
+    loss_function = DiceBCELoss()
+
+    def mean_loss(everywhere: bool) -> float:
+        losses = []
+        with torch.no_grad():
+            for batch in validation_loader:
+                for image, mask, valid in zip(
+                    batch["image"], batch["mask"], batch["valid"], strict=True
+                ):
+                    pixels = torch.ones_like(valid) if everywhere else valid
+                    logits = model(image[None])
+                    losses.append(
+                        float(loss_function(logits, mask[None], pixels[None]))
+                    )
+        return sum(losses) / len(losses)
+
+    _, loss = validate(model, validation_loader, CPU, amp=False)
+    assert loss == pytest.approx(mean_loss(everywhere=True))
+    assert loss != pytest.approx(mean_loss(everywhere=False))  # the data has padding
+
+
+def test_validation_without_images_gives_nan() -> None:
+    # MammogramDataset refuses an empty set; another loader may still be empty.
+    empty: torch.utils.data.DataLoader[Any] = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.empty(0))
+    )
+    result, loss = validate(Constant(0.0), empty, CPU, amp=False)
+    assert result.all_images.images == 0 and math.isnan(result.all_images.dice)
+    assert math.isnan(loss)
 
 
 def test_a_model_that_predicts_nothing_gets_the_documented_scores(data: Data) -> None:
@@ -319,7 +355,7 @@ def test_a_model_that_predicts_nothing_gets_the_documented_scores(data: Data) ->
             return torch.full_like(images, -20.0)
 
     _, validation_loader = loaders(data)
-    result = validate(Silent(), validation_loader, CPU, amp=False)
+    result, _ = validate(Silent(), validation_loader, CPU, amp=False)
     assert result.with_mass.dice == 0 and result.with_mass.sensitivity == 0
     assert result.without_mass.dice == 1 and result.without_mass.false_alarm_rate == 0
     assert result.all_images.dice == pytest.approx(12 / 16)
@@ -328,7 +364,11 @@ def test_a_model_that_predicts_nothing_gets_the_documented_scores(data: Data) ->
 # --- the history ---
 
 
-def record(epoch: int = 1, peak_gpu_memory_gb: float | None = None) -> EpochRecord:
+def record(
+    epoch: int = 1,
+    peak_gpu_memory_gb: float | None = None,
+    validation_loss: float | None = None,
+) -> EpochRecord:
     return EpochRecord(
         epoch=epoch,
         learning_rate=1e-4,
@@ -337,6 +377,7 @@ def record(epoch: int = 1, peak_gpu_memory_gb: float | None = None) -> EpochReco
         validation=summary(0.6),
         selection_value=0.6,
         peak_gpu_memory_gb=peak_gpu_memory_gb,
+        validation_loss=validation_loss,
     )
 
 
@@ -367,6 +408,25 @@ def test_a_history_from_before_the_peak_memory_is_still_read() -> None:
     old = json.loads(record_to_json(record()))
     del old["peak_gpu_memory_gb"]
     assert record_from_dict(old).peak_gpu_memory_gb is None
+
+
+def test_the_log_line_names_the_validation_loss_when_there_is_one() -> None:
+    text = describe(record(validation_loss=0.71234), "all_images.dice")
+    assert "train loss 0.5000, validation loss 0.7123, validation Dice" in text
+    assert "validation loss" not in describe(record(), "all_images.dice")
+
+
+def test_the_validation_loss_is_in_the_history_line() -> None:
+    line = json.loads(record_to_json(record(validation_loss=0.7)))
+    assert line["validation_loss"] == 0.7
+    assert record_from_dict(line).validation_loss == 0.7
+    assert json.loads(record_to_json(record()))["validation_loss"] is None
+
+
+def test_a_history_from_before_the_validation_loss_is_still_read() -> None:
+    old = json.loads(record_to_json(record(validation_loss=0.7)))
+    del old["validation_loss"]
+    assert record_from_dict(old).validation_loss is None
 
 
 def test_the_peak_memory_is_measured_on_a_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -420,10 +480,18 @@ def test_fit_runs_the_epochs_validates_and_writes_the_history(
     assert [r.epoch for r in result.history] == [1, 2, 3]
     assert all(r.validation.all_images.images == 16 for r in result.history)
     assert all(math.isfinite(r.train_loss) for r in result.history)
+    assert all(
+        r.validation_loss is not None and math.isfinite(r.validation_loss)
+        for r in result.history
+    )
     lines = (output / HISTORY_FILE).read_text().splitlines()
     assert [json.loads(line)["epoch"] for line in lines] == [1, 2, 3]
     assert all(json.loads(line)["peak_gpu_memory_gb"] is None for line in lines)
-    assert len([m for m in caplog.messages if m.startswith("epoch ")]) == 3
+    assert [json.loads(line)["validation_loss"] for line in lines] == [
+        r.validation_loss for r in result.history
+    ]
+    epochs = [m for m in caplog.messages if m.startswith("epoch ")]
+    assert len(epochs) == 3 and all("validation loss" in m for m in epochs)
     assert result.stop_reason == "finished"
 
 
@@ -504,7 +572,7 @@ def test_fit_accepts_a_loader_without_a_generator(data: Data) -> None:
 
 def fake_validation(monkeypatch: pytest.MonkeyPatch, summaries: list[Summary]) -> None:
     results = iter(summaries)
-    monkeypatch.setattr(train_module, "validate", lambda *args: next(results))
+    monkeypatch.setattr(train_module, "validate", lambda *args: (next(results), 0.5))
 
 
 def test_the_best_epoch_is_the_one_with_the_highest_selection_value(
@@ -825,9 +893,14 @@ class Bright(torch.nn.Module):
 
 def test_validation_can_predict_in_sliding_windows(data: Data) -> None:
     _, validation_loader = loaders(data)
-    whole = validate(Bright(), validation_loader, CPU, amp=False)
-    sliding = validate(Bright(), validation_loader, CPU, False, "sliding", (32, 32))
+    whole, whole_loss = validate(Bright(), validation_loader, CPU, amp=False)
+    sliding, sliding_loss = validate(
+        Bright(), validation_loader, CPU, False, "sliding", (32, 32)
+    )
     assert sliding == whole  # the same for a pixel-wise model
+    # Blending rounds the probabilities near 1 in float32, where log(1 - p) is
+    # sensitive, so the losses agree to about 1e-5.
+    assert sliding_loss == pytest.approx(whole_loss, rel=1e-4)
 
 
 def fold_metadata(
@@ -857,7 +930,7 @@ def test_a_fold_on_crops_validates_in_sliding_windows_of_its_canvas(
     real = train_module.validate
 
     def spy(*args: Any) -> Any:
-        seen.append(args[4:])
+        seen.append(args[4:6])
         return real(*args)
 
     monkeypatch.setattr(train_module, "validate", spy)

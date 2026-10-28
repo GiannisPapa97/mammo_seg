@@ -133,3 +133,40 @@ def test_a_batch_without_valid_pixels_is_rejected() -> None:
         DiceBCELoss()(
             torch.zeros(1, 1, 2, 2), torch.zeros(1, 1, 2, 2), ~ones(1, 1, 2, 2)
         )
+
+
+# --- from probabilities ---
+
+
+def test_the_loss_from_probabilities_is_the_loss_from_logits() -> None:
+    torch.manual_seed(0)
+    logits = torch.randn(3, 1, 8, 8) * 4
+    masks = (torch.rand(3, 1, 8, 8) > 0.8).float()
+    valid = torch.rand(3, 1, 8, 8) > 0.2
+    loss = DiceBCELoss(dice_weight=2, bce_weight=3)
+    assert loss.from_probabilities(
+        torch.sigmoid(logits), masks, valid
+    ).item() == pytest.approx(loss(logits, masks, valid).item(), rel=1e-5)
+
+
+def test_a_saturated_wrong_probability_costs_about_16_not_100() -> None:
+    masks = torch.zeros(1, 1, 1, 4)
+    probabilities = torch.tensor([[[[1.0, 0.0, 0.0, 0.0]]]])  # one pixel wrong
+    bce = DiceBCELoss(dice_weight=0, bce_weight=1).from_probabilities(
+        probabilities, masks, ones(1, 1, 1, 4)
+    )
+    # 1 - 1e-7 in float32 is 1 - 1.19e-7, so the pixel costs 15.9 instead of 100.
+    highest = torch.tensor(1 - 1e-7, dtype=torch.float32).item()
+    assert bce.item() == pytest.approx(-math.log(1 - highest) / 4, rel=1e-4)
+    assert 15.5 < bce.item() * 4 < 16.5
+
+
+def test_the_loss_from_probabilities_checks_its_inputs() -> None:
+    with pytest.raises(ValueError, match="shapes differ"):
+        DiceBCELoss().from_probabilities(
+            torch.zeros(1, 1, 2, 2), torch.zeros(1, 1, 2, 3), ones(1, 1, 2, 2)
+        )
+    with pytest.raises(ValueError, match="no valid pixel"):
+        DiceBCELoss().from_probabilities(
+            torch.zeros(1, 1, 2, 2), torch.zeros(1, 1, 2, 2), ~ones(1, 1, 2, 2)
+        )
