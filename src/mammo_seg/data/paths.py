@@ -14,3 +14,6 @@ PROCESSED_DIR = Path("data/processed")
 
 INBREAST_RAW_DIR = RAW_DIR / "inbreast" / "INbreast Release 1.0"
 INBREAST_PROCESSED_DIR = PROCESSED_DIR / "inbreast"
+
+CBIS_DDSM_RAW_DIR = RAW_DIR / "cbis-ddsm"
+CBIS_DDSM_PROCESSED_DIR = PROCESSED_DIR / "cbis-ddsm"

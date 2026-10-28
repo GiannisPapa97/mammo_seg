@@ -1,7 +1,10 @@
-"""Build and validate the manifest of the INbreast dataset.
+"""Build and validate the manifest of a dataset: INbreast, or CBIS-DDSM.
 
-The manifest has one record per image and combines what the raw release spreads
-over several places: the DICOM filename (patient id, laterality, view),
+This module builds that of INbreast; ``cbis_ddsm.py`` builds that of CBIS-DDSM,
+in the same schema. ``main`` builds either (``--dataset``).
+
+The manifest has one record per image. For INbreast it combines what the release
+spreads over several places: the DICOM filename (patient id, laterality, view),
 ``INbreast.csv`` (date, BI-RADS, ACR density), the DICOM header (image size) and
 the ``.xml`` annotations (every lesion with its type and polygon). Later steps
 read the manifest instead of the raw files. The schema is in ``schema.py``.
@@ -10,7 +13,7 @@ The headers have no pixel spacing; the publication gives 0.07 mm, which the
 ``Area`` of the annotations (in cm²) confirms for every mass polygon. INbreast has
 no official split, no lesion pathology and leaves no image out.
 
-Run it with ``python -m mammo_seg.data.manifest``.
+Run it with ``python -m mammo_seg.data.manifest [--dataset cbis-ddsm]``.
 """
 
 import argparse
@@ -18,7 +21,7 @@ import csv
 import re
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
@@ -27,13 +30,22 @@ import pydicom
 from pydantic import ValidationError
 
 from mammo_seg.data.annotations import read_rois
-from mammo_seg.data.paths import INBREAST_PROCESSED_DIR, INBREAST_RAW_DIR
+from mammo_seg.data.cbis_ddsm import build_cbis_ddsm_manifest
+from mammo_seg.data.paths import (
+    CBIS_DDSM_PROCESSED_DIR,
+    CBIS_DDSM_RAW_DIR,
+    INBREAST_PROCESSED_DIR,
+    INBREAST_RAW_DIR,
+)
 from mammo_seg.data.schema import (
     SCHEMA_VERSION,
+    Dataset,
     ImageRecord,
     Manifest,
+    ManifestError,
     Roi,
     View,
+    describe,
     dropped_to_json,
     image_to_json,
     manifest_from_json,
@@ -69,14 +81,6 @@ _FILENAME = re.compile(
 _CSV_COLUMNS = ["File Name", "Laterality", "View", "Acquisition date", "ACR", "Bi-Rads"]
 # The filenames spell the mediolateral oblique view ML, the CSV and the manifest MLO.
 _FILENAME_VIEWS = {"ML": View.MLO}
-
-
-class ManifestError(ValueError):
-    """The raw dataset files are inconsistent. ``problems`` lists every issue."""
-
-    def __init__(self, problems: list[str]) -> None:
-        self.problems = problems
-        super().__init__("invalid dataset:\n- " + "\n- ".join(problems))
 
 
 class _Dicom(NamedTuple):
@@ -175,14 +179,6 @@ def _read_size(dataset_dir: Path, dicom_path: str) -> tuple[int, int]:
     return int(header.Rows), int(header.Columns)
 
 
-def _describe(error: ValidationError) -> str:
-    """The invalid fields of a validation error as one line."""
-    return "; ".join(
-        f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
-        for item in error.errors()
-    )
-
-
 def build_manifest(dataset_dir: Path) -> Manifest:
     """Build the manifest of the INbreast release in ``dataset_dir``.
 
@@ -238,10 +234,21 @@ def build_manifest(dataset_dir: Path) -> Manifest:
         try:
             images.append(ImageRecord(**fields))
         except ValidationError as error:
-            problems.append(f"image {file_id}: {_describe(error)}")
+            problems.append(f"image {file_id}: {describe(error)}")
     if problems:
         raise ManifestError(problems)
     return Manifest(version=SCHEMA_VERSION, dataset="inbreast", images=tuple(images))
+
+
+# The datasets: name -> (builder, default raw folder, default manifest).
+DATASETS: dict[Dataset, tuple[Callable[[Path], Manifest], Path, Path]] = {
+    "inbreast": (build_manifest, DEFAULT_DATASET_DIR, DEFAULT_OUTPUT),
+    "cbis-ddsm": (
+        build_cbis_ddsm_manifest,
+        CBIS_DDSM_RAW_DIR,
+        CBIS_DDSM_PROCESSED_DIR / "manifest.json",
+    ),
+}
 
 
 def _json_list(lines: list[str]) -> str:
@@ -308,22 +315,34 @@ def rois_frame(manifest: Manifest) -> pd.DataFrame:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--dataset", choices=list(DATASETS), default="inbreast")
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        help="the raw dataset (default: that of --dataset in data/raw/)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="the manifest (default: that of --dataset in data/processed/)",
+    )
     args = parser.parse_args(argv)
+    build, default_dir, default_output = DATASETS[args.dataset]
+    output = args.output or default_output
 
     try:
-        manifest = build_manifest(args.dataset_dir)
+        manifest = build(args.dataset_dir or default_dir)
     except ManifestError as error:
         print(error, file=sys.stderr)
         return 1
-    write_manifest(manifest, args.output)
+    write_manifest(manifest, output)
     images = images_frame(manifest)
     print(
-        f"Wrote {args.output}: {len(images)} images, "
+        f"Wrote {output}: {len(images)} images, "
         f"{images.patient_id.nunique()} patients, "
         f"{int(images.has_mass.sum())} with a mass, "
-        f"{sum(len(image.rois) for image in manifest.images)} ROIs"
+        f"{sum(len(image.rois) for image in manifest.images)} ROIs, "
+        f"{len(manifest.dropped)} images left out"
     )
     return 0
 

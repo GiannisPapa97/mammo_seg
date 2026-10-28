@@ -4,7 +4,7 @@ A reproducible PyTorch framework for segmentation of mammography images, startin
 
 > **Research use only.** This project is not a medical device and its output must not be used for clinical decisions.
 
-**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset, patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. The metrics, the loss, the model, checkpoints, the training loop and the evaluation are in place ([docs/training.md](docs/training.md)). Training on all five folds works with crops around the masses, but the model is not yet a useful detector: it beats predicting nothing on the Dice over all images in two of the five folds (a mean Dice of about 0.56 on the images with a mass). The test set has not been used.
+**Status:** early development. The data pipeline is in place: a validated manifest of the INbreast dataset (and of the masses of CBIS-DDSM, which the later steps do not read yet), patient-level splits, mass masks, the preprocessing, and the PyTorch dataset and loaders. The metrics, the loss, the model, checkpoints, the training loop and the evaluation are in place ([docs/training.md](docs/training.md)). Training on all five folds works with crops around the masses, but the model is not yet a useful detector: it beats predicting nothing on the Dice over all images in two of the five folds (a mean Dice of about 0.56 on the images with a mass). The test set has not been used.
 
 ## Development
 
@@ -50,15 +50,17 @@ scripts/download_data.sh all         # both
 ```
 
 - `inbreast`: the [Kaggle copy of INbreast](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) (about 2 GB, about 9 GB unzipped) into `data/raw/inbreast/`. See [docs/dataset.md](docs/dataset.md) for what it contains.
-- `cbis-ddsm`: the [Kaggle copy of CBIS-DDSM](https://www.kaggle.com/datasets/awsaf49/cbis-ddsm-breast-cancer-image-dataset) as JPEG images with CSV descriptions (about 5.3 GB, about 6.3 GB unzipped) into `data/raw/cbis-ddsm/`. The pipeline below does not read it yet.
+- `cbis-ddsm`: the [Kaggle copy of CBIS-DDSM](https://www.kaggle.com/datasets/awsaf49/cbis-ddsm-breast-cancer-image-dataset) as JPEG images with CSV descriptions (about 5.3 GB, about 6.3 GB unzipped) into `data/raw/cbis-ddsm/`. See [docs/dataset-cbis-ddsm.md](docs/dataset-cbis-ddsm.md). Only its manifest is built so far (below); the later steps read INbreast.
 
-The script needs `curl` and `unzip`, checks the size of each zip and the number of images after unzipping, resumes an interrupted download (up to five tries in a row, then by running it again), and does nothing for a dataset that is already there. The zip is kept; delete it to free the space. The license of the INbreast copy is unclear, so do not redistribute the data.
+The script needs `curl` and `unzip`, checks the size of each zip and the number of images after unzipping, resumes an interrupted download (up to five tries in a row, then by running it again), and does nothing for a dataset that is already there. The zip is kept; delete it to free the space. The license of the INbreast copy is unclear, so do not redistribute the data. CBIS-DDSM is under CC BY 3.0 (TCIA): cite it whenever it is used; see [docs/dataset-cbis-ddsm.md](docs/dataset-cbis-ddsm.md#license-and-use).
 
 Then build the validated manifest (`data/processed/inbreast/manifest.json`: every image with its metadata and lesions):
 
 ```bash
 uv run python -m mammo_seg.data.manifest
 ```
+
+For CBIS-DDSM, `--dataset cbis-ddsm` writes `data/processed/cbis-ddsm/manifest.json`: its masses, with their masks, pathology and the official train and test sets.
 
 Then make patient-level splits (`data/processed/inbreast/splits.json`), stratified on masses, mass size and breast density, for example 5 folds with a 20% test set:
 

@@ -26,3 +26,18 @@ def test_the_defaults_stay_in_the_folders_of_inbreast() -> None:
     for path in derived:
         assert path.parent == paths.INBREAST_PROCESSED_DIR
     assert manifest.DEFAULT_DATASET_DIR.is_relative_to(paths.RAW_DIR / "inbreast")
+
+
+def test_cbis_ddsm_has_its_own_folders() -> None:
+    assert paths.CBIS_DDSM_RAW_DIR == Path("data/raw/cbis-ddsm")
+    assert paths.CBIS_DDSM_PROCESSED_DIR == Path("data/processed/cbis-ddsm")
+
+
+def test_the_manifest_of_each_dataset_has_its_default_folders() -> None:
+    _, raw, output = manifest.DATASETS["cbis-ddsm"]
+    assert (raw, output) == (
+        paths.CBIS_DDSM_RAW_DIR,
+        paths.CBIS_DDSM_PROCESSED_DIR / "manifest.json",
+    )
+    _, raw, output = manifest.DATASETS["inbreast"]
+    assert (raw, output) == (manifest.DEFAULT_DATASET_DIR, manifest.DEFAULT_OUTPUT)
