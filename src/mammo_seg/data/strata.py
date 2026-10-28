@@ -21,6 +21,10 @@ first:
 
 Areas are in mm², from the outlines at the native pixel size of each image (in
 the manifest), never in preprocessed pixels, whose size varies from image to image.
+For an image of unknown pixel size (CBIS-DDSM), a mass is small below
+``small_mass_px`` native pixels instead: 40,000, which is 100 mm² at about 0.05 mm
+per pixel, the order of the DDSM scanners. That size only balances the sets; it is
+not a measurement, and no area in mm² is computed from it.
 
 A group needs enough patients to put one in every set. ``merge_small_groups``
 merges a group that is too small with its neighbours by dropping its last factor:
@@ -39,6 +43,7 @@ from pydantic.dataclasses import dataclass
 from mammo_seg.data.schema import ImageRecord, LesionType
 
 DEFAULT_SMALL_MASS_MM2: Final = 100.0
+DEFAULT_SMALL_MASS_PX: Final = 40_000.0  # for images of unknown pixel size
 DEFAULT_DENSE_ACR: Final = 3
 SEPARATOR: Final = "/"  # between the factors of a group name
 
@@ -51,6 +56,7 @@ class Stratification:
 
     small_mass_mm2: Annotated[float, Field(gt=0)] = DEFAULT_SMALL_MASS_MM2
     dense_acr: Annotated[int, Field(ge=1, le=4)] = DEFAULT_DENSE_ACR
+    small_mass_px: Annotated[float, Field(gt=0)] = DEFAULT_SMALL_MASS_PX
 
 
 @std_dataclass(frozen=True)
@@ -59,13 +65,11 @@ class PatientProfile:
 
     patient_id: str
     dense: bool  # an image has an ACR density of at least the threshold
-    # The area of the smallest mass in any image; None without a mass.
+    has_mass: bool
+    # The area of the smallest mass of known size in any image; None without a
+    # mass, or when no image of the patient has a pixel size.
     smallest_mass_mm2: float | None
     small_mass: bool  # a mass is smaller than the threshold; False without a mass
-
-    @property
-    def has_mass(self) -> bool:
-        return self.smallest_mass_mm2 is not None
 
     @property
     def group(self) -> Group:
@@ -82,10 +86,13 @@ def patient_profiles(
     """One profile per patient of ``images``, sorted by patient id.
 
     Only mass ROIs count; the same mass seen in two views counts in both, so a
-    mass that is small in one view makes the patient's group ``small``. Raises
-    ValueError for a mass in an image of unknown pixel size.
+    mass that is small in one view makes the patient's group ``small``. A mass is
+    small below ``small_mass_mm2``, or, in an image of unknown pixel size, below
+    ``small_mass_px`` native pixels.
     """
     dense: dict[str, bool] = {}
+    has_mass: dict[str, bool] = {}
+    small: dict[str, bool] = {}
     smallest: dict[str, float | None] = {}
     for image in images:
         patient = image.patient_id
@@ -94,22 +101,27 @@ def patient_profiles(
         )
         smallest.setdefault(patient, None)
         for roi in image.rois:
-            if roi.lesion_type is LesionType.MASS:
+            if roi.lesion_type is not LesionType.MASS:
+                continue
+            has_mass[patient] = True
+            if image.pixel_size_mm is None:
+                is_small = roi.area_px < stratification.small_mass_px
+            else:
                 area = image.area_mm2(roi)
                 known = smallest[patient]
                 smallest[patient] = area if known is None else min(known, area)
-    profiles = []
-    for patient in sorted(dense):
-        least = smallest[patient]
-        profiles.append(
-            PatientProfile(
-                patient_id=patient,
-                dense=dense[patient],
-                smallest_mass_mm2=least,
-                small_mass=least is not None and least < stratification.small_mass_mm2,
-            )
+                is_small = area < stratification.small_mass_mm2
+            small[patient] = small.get(patient, False) or is_small
+    return [
+        PatientProfile(
+            patient_id=patient,
+            dense=dense[patient],
+            has_mass=has_mass.get(patient, False),
+            smallest_mass_mm2=smallest[patient],
+            small_mass=small.get(patient, False),
         )
-    return profiles
+        for patient in sorted(dense)
+    ]
 
 
 def group_name(group: Group) -> str:

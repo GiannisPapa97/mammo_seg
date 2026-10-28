@@ -4,11 +4,12 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from tests.data.manifests import SQUARE, make_manifest
+from tests.data.manifests import SQUARE, make_manifest, pid
 
 from mammo_seg.data.manifest import write_manifest
 from mammo_seg.data.schema import LesionType, Manifest, Roi
 from mammo_seg.data.splits import (
+    _SPLITS_FILE,
     DEFAULT_SEED,
     Splits,
     SplitsFile,
@@ -109,9 +110,14 @@ def test_a_splits_file_round_trips_through_json(tmp_path: Path) -> None:
         "stratification",
         "strata",
         "splits",
+        "official_test",
     ]
     # The pixel size comes from the manifest, so it is not a setting of the splits.
-    assert list(data["stratification"]) == ["small_mass_mm2", "dense_acr"]
+    assert list(data["stratification"]) == [
+        "small_mass_mm2",
+        "dense_acr",
+        "small_mass_px",
+    ]
     assert list(data["splits"]) == ["test_patients", "folds", "excluded_images"]
 
 
@@ -319,3 +325,80 @@ def test_main_reports_an_invalid_manifest(
     manifest.write_text('{"version": 2, "images": []}')
     assert run(manifest, tmp_path / "splits.json", "--folds", "5") == 1
     assert "version" in capsys.readouterr().err
+
+
+def official_manifest(test_patients: int = 10) -> Manifest:
+    """``make_manifest(20, 30)`` with the first ``test_patients`` patients of each
+    kind in the official test set, CBIS-DDSM style."""
+    manifest = make_manifest(20, 30)
+    test = {
+        pid(p)
+        for p in [*range(test_patients // 2), *range(20, 20 + test_patients // 2)]
+    }
+    images = tuple(
+        replace(
+            image,
+            pixel_size_mm=None,
+            official_split="test" if image.patient_id in test else "train",
+        )
+        for image in manifest.images
+    )
+    return Manifest(version=2, dataset="cbis-ddsm", images=images)
+
+
+def test_the_official_test_set_is_held_out_and_recorded() -> None:
+    manifest = official_manifest()
+    splits_file = create_splits_file(manifest, 4, official_test=True)
+    test = {i.patient_id for i in manifest.images if i.official_split == "test"}
+    assert set(splits_file.splits.test_patients) == test
+    in_folds = {p for fold in splits_file.splits.folds for p in fold}
+    assert not in_folds & test and len(in_folds) == 40
+    assert splits_file.official_test and splits_file.test_fraction is None
+    assert read_splits_text(splits_file) == splits_file
+
+
+def read_splits_text(splits_file: SplitsFile) -> SplitsFile:
+    return _SPLITS_FILE.validate_json(_SPLITS_FILE.dump_json(splits_file))
+
+
+def test_a_file_made_before_the_official_test_set_still_reads() -> None:
+    splits_file = create_splits_file(make_manifest(20, 30), 5, test_fraction=0.2)
+    data = json.loads(_SPLITS_FILE.dump_json(splits_file))
+    del data["official_test"]
+    assert _SPLITS_FILE.validate_json(json.dumps(data)) == splits_file
+
+
+def test_a_test_fraction_and_the_official_test_set_are_not_both_allowed() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        create_splits_file(official_manifest(), 4, 0.2, official_test=True)
+    splits_file = create_splits_file(official_manifest(), 4, official_test=True)
+    with pytest.raises(ValidationError, match="not both"):
+        replace(splits_file, test_fraction=0.2)
+
+
+def test_main_holds_out_the_official_test_set(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path, output = tmp_path / "manifest.json", tmp_path / "splits.json"
+    write_manifest(official_manifest(), manifest_path)
+    assert run(manifest_path, output, "--folds", "4", "--official-test") == 0
+    assert "test" in capsys.readouterr().out
+    splits_file = read_splits(output)
+    assert splits_file.official_test and len(splits_file.splits.test_patients) == 10
+
+
+def test_main_refuses_a_test_fraction_with_the_official_test_set(
+    manifest_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "splits.json"
+    with pytest.raises(SystemExit):
+        run(
+            manifest_path,
+            output,
+            "--folds",
+            "4",
+            "--official-test",
+            "--test-fraction",
+            "0.2",
+        )
+    assert "not allowed with argument" in capsys.readouterr().err
