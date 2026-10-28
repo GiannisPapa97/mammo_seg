@@ -52,11 +52,13 @@ from mammo_seg.data.preprocessing import (
     Pixels,
     PreprocessingSettings,
     PreprocessParams,
+    find_breast,
+    kept_area,
     preprocess,
     preprocess_mask,
     read_pixels,
 )
-from mammo_seg.data.schema import Dataset, FileId, Manifest
+from mammo_seg.data.schema import Dataset, FileId, ImageRecord, Manifest
 
 DEFAULT_MANIFEST = INBREAST_PROCESSED_DIR / "manifest.json"
 DEFAULT_DATASET_DIR = INBREAST_RAW_DIR
@@ -77,6 +79,8 @@ DATASET_SETTINGS: Final[dict[Dataset, PreprocessingSettings]] = {
         border=2,
         max_intensity=255,
         orientation="image",
+        film_edge_depth=0.05,
+        clear_background=6,
     ),
 }
 
@@ -85,6 +89,10 @@ DATASET_SETTINGS: Final[dict[Dataset, PreprocessingSettings]] = {
 # masses the rescaled area is within 1.3% of the expected one.
 MASK_AREA_TOLERANCE = 0.05
 MASK_EDGE_TOLERANCE = 0.5  # per pixel on the edge of the rescaled mask
+# Clearing the background may erase the edge of a mass that bulges out of the
+# breast at the skin line, which the coarse breast region cuts off: on CBIS-DDSM at
+# most 0.34% of a mass, keeping 48 pixels around the breast. More is an error.
+MASS_CLEARED_TOLERANCE = 0.01  # of the pixels of the mask
 
 
 class PreprocessingError(ValueError):
@@ -180,6 +188,29 @@ def check_mask_kept(mask: Mask, rescaled: Mask, params: PreprocessParams) -> Non
         )
 
 
+def check_mass_not_cleared(
+    pixels: Pixels, mask: Mask, image: ImageRecord, settings: PreprocessingSettings
+) -> None:
+    """Raise ValueError if clearing the background (``settings.clear_background``)
+    would erase more than ``MASS_CLEARED_TOLERANCE`` of a mask in tissue: mask
+    pixels brighter than the threshold outside the kept area. Mask pixels on the
+    dark background (a mask drawn past the skin line) are not tissue and are left
+    out."""
+    if settings.clear_background is None:
+        return
+    kept = kept_area(
+        find_breast(pixels, image.laterality, settings),
+        (pixels.shape[0], pixels.shape[1]),
+        settings.downscale,
+        settings.clear_background,
+    )
+    erased = np.count_nonzero((mask == 1) & ~kept & (pixels > settings.threshold))
+    if erased > MASS_CLEARED_TOLERANCE * np.count_nonzero(mask):
+        raise ValueError(
+            f"clearing the background erases {erased} pixels of tissue of a mass"
+        )
+
+
 def preprocess_dataset(
     manifest: Manifest,
     dataset_dir: Path,
@@ -208,6 +239,7 @@ def preprocess_dataset(
             mask = read_mask(mask_path(masks_dir, image.file_id))
             rescaled = preprocess_mask(mask, params)
             check_mask_kept(mask, rescaled, params)
+            check_mass_not_cleared(pixels, mask, image, settings)
         except (OSError, ValueError, InvalidDicomError) as error:
             problems.append(f"image {image.file_id}: {error}")
             continue

@@ -16,6 +16,7 @@ from mammo_seg.data.preprocess_dataset import (
     PreprocessingError,
     PreprocessingRecord,
     check_mask_kept,
+    check_mass_not_cleared,
     check_settings,
     image_path,
     main,
@@ -438,6 +439,7 @@ def test_cbis_ddsm_has_its_settings_and_inbreast_the_defaults() -> None:
     cbis = DATASET_SETTINGS["cbis-ddsm"]
     assert (cbis.max_intensity, cbis.orientation) == (255, "image")
     assert (cbis.threshold, cbis.margin, cbis.opening, cbis.border) == (20, 0.04, 3, 2)
+    assert (cbis.film_edge_depth, cbis.clear_background) == (0.05, 6)
 
 
 def test_main_preprocesses_cbis_ddsm_with_its_settings(
@@ -489,3 +491,61 @@ def test_main_preprocesses_cbis_ddsm_with_its_settings(
     assert 190 <= result.max() <= 200  # the 8-bit values are kept
     assert result[:, :10].mean() > result[:, -10:].mean()  # the wall is on the left
     assert read_mask(processed_mask_path(tmp_path / "out", ID1)).any()
+
+
+CLEARING = PreprocessingSettings(downscale=1, opening=0, clear_background=1)
+
+
+def test_a_mass_inside_the_breast_is_not_cleared() -> None:
+    image = replace(make_image(1, 1), rows=400, cols=300)
+    mask = np.zeros((400, 300), dtype=np.uint8)
+    mask[150:200, 120:160] = 1
+    check_mass_not_cleared(breast((150, 200, 120, 160)), mask, image, CLEARING)
+
+
+def test_a_mask_drawn_past_the_skin_line_onto_the_background_is_allowed() -> None:
+    image = replace(make_image(1, 1), rows=400, cols=300)
+    mask = np.zeros((400, 300), dtype=np.uint8)
+    mask[150:200, 180:240] = 1  # the breast ends at column 200
+    check_mass_not_cleared(breast(None), mask, image, CLEARING)
+
+
+def test_clearing_tissue_of_a_mass_is_an_error() -> None:
+    pixels = breast(None)
+    pixels[20:40, 20:40] = 1500  # a bright spot apart from the breast
+    image = replace(make_image(1, 1), rows=400, cols=300)
+    mask = np.zeros((400, 300), dtype=np.uint8)
+    mask[20:40, 20:40] = 1
+    with pytest.raises(ValueError, match="erases 400 pixels of tissue of a mass"):
+        check_mass_not_cleared(pixels, mask, image, CLEARING)
+    check_mass_not_cleared(
+        pixels, mask, image, replace(CLEARING, clear_background=None)
+    )
+
+
+def test_erasing_up_to_one_percent_of_a_mass_is_allowed() -> None:
+    pixels = breast(None)
+    pixels[20:22, 20:22] = 1500  # 4 pixels apart from the breast
+    image = replace(make_image(1, 1), rows=400, cols=300)
+    mask = np.zeros((400, 300), dtype=np.uint8)
+    mask[150:170, 100:120] = 1  # 400 pixels in the breast
+    mask[20:22, 20:22] = 1  # and the 4 apart: 4 of 404, under 1%
+    check_mass_not_cleared(pixels, mask, image, CLEARING)
+    mask[20:22, 22] = 1
+    pixels[20:22, 22] = 1500  # 6 of 406, over 1%
+    with pytest.raises(ValueError, match="erases 6 pixels"):
+        check_mass_not_cleared(pixels, mask, image, CLEARING)
+
+
+def test_the_dataset_reports_a_mass_the_clearing_would_erase(dataset: Dataset) -> None:
+    from mammo_seg.data.masks import write_mask
+
+    pixels = breast(None)
+    pixels[20:40, 20:40] = 1500
+    write_dicom_pixels(dataset.dicoms / "AllDICOMs" / f"{ID3}.dcm", pixels)
+    mask = np.zeros((400, 300), dtype=np.uint8)
+    mask[20:40, 20:40] = 1
+    write_mask(mask, mask_path(dataset.masks, ID3))
+    settings = replace(SETTINGS, clear_background=1, margin=1.0)
+    with pytest.raises(PreprocessingError, match=f"image {ID3}: clearing the"):
+        run(dataset, settings)

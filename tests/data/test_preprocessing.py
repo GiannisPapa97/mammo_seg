@@ -1,3 +1,4 @@
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -13,11 +14,19 @@ from mammo_seg.data.preprocessing import (
     DEFAULT_MAX_INTENSITY,
     DEFAULT_SIZE,
     BoundingBox,
+    Breast,
+    Edges,
     PreprocessingSettings,
     PreprocessParams,
     breast_bbox,
     breast_region,
+    bright_mask,
     chest_wall_on_right,
+    clear_edges,
+    film_edges,
+    find_breast,
+    kept_area,
+    largest_region,
     normalize_intensity,
     preprocess,
     preprocess_mask,
@@ -263,6 +272,122 @@ def test_by_image_the_flip_follows_the_chest_wall_not_the_laterality(
     assert result[:, :5].mean() > result[:, -5:].mean()  # the wall is on the left
 
 
+def film(wall: str = "left") -> np.ndarray:
+    """A 100 x 80 film: a breast at the chest wall, bright film edges along the top
+    and the far side touching it, and a label in the background."""
+    pixels = image(breast=(20, 80, 0, 40), label=(85, 92, 60, 70))
+    pixels[:3] = 2000  # the top edge of the film
+    pixels[:, 77:] = 2000  # the far side
+    pixels[40:45, 40:77] = 2000  # a strip from the breast to the far edge
+    return pixels if wall == "left" else np.ascontiguousarray(pixels[:, ::-1])
+
+
+def edges_of(mask: np.ndarray, wall_on_right: bool = False, **kwargs: float) -> Edges:
+    return film_edges(mask, depth=0.05, wall_on_right=wall_on_right, **kwargs)
+
+
+@pytest.mark.parametrize("wall", ["left", "right"])
+def test_film_edges_on_the_sides_away_from_the_chest_wall_are_found(
+    wall: str,
+) -> None:
+    mask = bright_mask(film(wall), downscale=1)
+    edges = edges_of(mask, wall == "right")
+    assert edges == Edges(top=3, bottom=0, far=3)
+    cleared = clear_edges(mask, edges, wall == "right")
+    assert not cleared[:3].any()  # the top edge
+    far = slice(77, 80) if wall == "left" else slice(0, 3)
+    assert not cleared[:, far].any()  # the far side
+    breast = slice(0, 40) if wall == "left" else slice(40, 80)
+    assert cleared[20:80, breast].all()  # the breast is kept
+    assert mask[:3].all()  # the input is not changed
+
+
+def test_the_chest_wall_side_is_never_a_film_edge() -> None:
+    mask = np.zeros((100, 80), dtype=bool)
+    mask[:, :2] = True  # a full column at the chest wall
+    assert edges_of(mask) == Edges(0, 0, 0)
+    assert edges_of(mask, wall_on_right=True).far == 2  # there, it is the far side
+
+
+def test_a_bright_run_deeper_than_the_depth_is_tissue_and_kept() -> None:
+    mask = np.zeros((100, 80), dtype=bool)
+    mask[:8] = True  # 8% of the height: deeper than 5%
+    mask[-3:] = True  # 3%: a film edge
+    assert edges_of(mask) == Edges(top=0, bottom=3, far=0)
+
+
+def test_rows_less_bright_than_the_coverage_are_not_a_film_edge() -> None:
+    mask = np.zeros((100, 80), dtype=bool)
+    mask[:3, :60] = True  # 75% of each row
+    assert edges_of(mask).top == 0
+    assert edges_of(mask, coverage=0.7).top == 3
+
+
+def test_an_image_filled_with_bright_rows_has_no_film_edge() -> None:
+    assert edges_of(np.ones((100, 80), dtype=bool)) == Edges(0, 0, 0)
+
+
+def test_film_edges_that_touch_the_breast_are_cleared_before_finding_it() -> None:
+    pixels = film()
+    plain = PreprocessingSettings(downscale=1, opening=0, margin=0.0)
+    region, flipped, _ = find_breast(pixels, "L", plain)
+    assert region[:3].any() and not flipped
+    with_edges = replace(plain, film_edge_depth=0.05)
+    region = find_breast(pixels, "L", with_edges).region
+    box = region_bbox(region, pixels.shape, downscale=1, margin=0.0)
+    # The strip from the breast to the far edge is still there, but no longer
+    # reaches the cleared top edge or the far side.
+    assert (box.top, box.bottom, box.left, box.right) == (20, 80, 0, 77)
+
+
+def test_the_kept_area_is_the_region_widened_and_scaled_up() -> None:
+    region = np.zeros((10, 8), dtype=bool)
+    region[4:6, 3:5] = True
+    breast = Breast(region, False, region.copy())
+    kept = kept_area(breast, (79, 62), downscale=8, widen=1)
+    assert kept.shape == (79, 62)
+    expected = np.zeros((79, 62), dtype=bool)
+    expected[3 * 8 : 7 * 8, 2 * 8 : 6 * 8] = True
+    assert np.array_equal(kept, expected)
+    assert kept_area(breast, (80, 64), downscale=8, widen=0).sum() == 4 * 64
+
+
+def test_dim_speckled_tissue_next_to_the_breast_is_kept_and_a_label_is_not() -> None:
+    region = np.zeros((40, 40), dtype=bool)
+    region[10:30, :15] = True
+    bright = region.copy()
+    bright[10:30, 15:25:2] = True  # speckle: every other column, gaps of 1 pixel
+    bright[34:37, 34:37] = True  # a label apart from the breast
+    bright[2:5, 20:23] = True  # a ring around a hole is filled
+    kept = kept_area(Breast(region, False, bright), (40, 40), downscale=1, widen=0)
+    assert kept[10:30, :24].all()
+    assert not kept[34:37, 34:37].any()
+    assert not kept[2:5, 20:23].any()  # not connected to the breast
+
+
+def test_clearing_the_background_removes_labels_and_keeps_the_breast() -> None:
+    pixels = image(breast=(20, 80, 0, 40), label=(85, 95, 50, 78))
+    settings = PreprocessingSettings(
+        downscale=1, opening=0, margin=0.5, size=100, clear_background=2
+    )
+    result, params = preprocess(pixels, "L", settings)
+    assert params.box.bottom == 100  # the margin reaches the label
+    rows = slice(85 - params.box.top, 95 - params.box.top)
+    assert not result[rows, 50:78].any()  # the label is cleared
+    kept = preprocess(pixels, "L", replace(settings, clear_background=None))[0]
+    assert kept[rows, 50:78].all()
+    assert np.array_equal(result[: 80 - params.box.top], kept[: 80 - params.box.top])
+
+
+def test_the_mask_and_region_helpers_reject_bad_arguments() -> None:
+    with pytest.raises(ValueError, match="downscale must be at least 1"):
+        bright_mask(image(), downscale=0)
+    with pytest.raises(ValueError, match="border at least 0"):
+        largest_region(np.ones((4, 4), dtype=bool), border=-1)
+    with pytest.raises(ValueError, match="no breast found"):
+        largest_region(np.zeros((4, 4), dtype=bool))
+
+
 def test_an_image_without_a_breast_is_rejected() -> None:
     with pytest.raises(ValueError, match="no breast found"):
         exact_bbox(np.zeros((50, 50), dtype=np.uint16))
@@ -416,6 +541,8 @@ def test_the_default_settings_are_the_documented_ones() -> None:
     assert settings.max_intensity == DEFAULT_MAX_INTENSITY == 4095
     assert settings.percentile is None
     assert (settings.border, settings.orientation) == (0, "laterality")
+    assert (settings.film_edge_depth, settings.film_edge_coverage) == (0.0, 0.8)
+    assert settings.clear_background is None
 
 
 def test_settings_written_before_border_and_orientation_still_read() -> None:
@@ -440,6 +567,10 @@ def test_settings_written_before_border_and_orientation_still_read() -> None:
         {"percentile": 100.5},
         {"border": -1},
         {"orientation": "nipple"},
+        {"film_edge_depth": -0.1},
+        {"film_edge_depth": 1.0},
+        {"film_edge_coverage": 0},
+        {"clear_background": -1},
     ],
 )
 def test_invalid_settings_are_rejected(changes: dict[str, float]) -> None:

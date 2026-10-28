@@ -13,7 +13,7 @@ back onto the original image.
 """
 
 from pathlib import Path
-from typing import Annotated, Any, Final, Literal, Self, TypeVar
+from typing import Annotated, Any, Final, Literal, NamedTuple, Self, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -31,6 +31,8 @@ DEFAULT_DOWNSCALE = 8  # the breast mask is made on every 8th pixel
 DEFAULT_OPENING = 1  # removes bright strips thinner than about 3 mask pixels
 DEFAULT_SIZE = 1024  # length of the longer side after rescaling
 DEFAULT_MAX_INTENSITY = 4095  # the 12-bit range of the INbreast images
+DEFAULT_FILM_EDGE_COVERAGE = 0.8  # share of bright pixels in a row of a film edge
+KEPT_CLOSING = 2  # mask pixels: gaps in dim tissue closed when clearing the background
 IMAGE_SUFFIXES: Final = (".jpg", ".jpeg", ".png")  # read as images, the rest as DICOM
 
 # Right breasts are flipped so the chest wall is always on the left, where it
@@ -88,22 +90,45 @@ def breast_region(
     """The breast on every ``downscale``-th pixel of the image, as a boolean mask.
 
     The breast is the largest connected region (8-connected) of pixels brighter
-    than ``threshold``. Taking the largest region keeps stray bright pixels,
-    labels and markers in the background out of it. The mask is ``opening`` times
-    morphologically opened to cut off thin bright strips along the image border
-    that touch the breast, and the outer ``border`` mask pixels on every side are
-    left out first, for the bright film edges of scanned mammograms.
+    than ``threshold`` (see ``largest_region``). Raises ValueError for an image that
+    is not 2-D, invalid arguments, or an image with no breast.
+    """
+    return largest_region(bright_mask(pixels, threshold, downscale), opening, border)
 
-    Raises ValueError for an image that is not 2-D, invalid arguments, or an image
-    with no breast.
+
+def bright_mask(
+    pixels: npt.NDArray[np.number[Any]],
+    threshold: int = DEFAULT_THRESHOLD,
+    downscale: int = DEFAULT_DOWNSCALE,
+) -> npt.NDArray[np.bool_]:
+    """The pixels brighter than ``threshold``, on every ``downscale``-th pixel.
+
+    Raises ValueError for an image that is not 2-D or a downscale below 1.
     """
     if pixels.ndim != 2:
         raise ValueError(f"expected a 2-D image, got {pixels.ndim} dimensions")
-    if downscale < 1 or opening < 0 or border < 0:
-        raise ValueError(
-            "downscale must be at least 1, opening at least 0 and border at least 0"
-        )
-    mask = pixels[::downscale, ::downscale] > threshold
+    if downscale < 1:
+        raise ValueError("downscale must be at least 1")
+    mask: npt.NDArray[np.bool_] = pixels[::downscale, ::downscale] > threshold
+    return mask
+
+
+def largest_region(
+    mask: npt.NDArray[np.bool_], opening: int = DEFAULT_OPENING, border: int = 0
+) -> npt.NDArray[np.bool_]:
+    """The largest connected region (8-connected) of a ``bright_mask``.
+
+    Taking the largest region keeps stray bright pixels, labels and markers in the
+    background out of it. The mask is ``opening`` times morphologically opened to
+    cut off thin bright strips along the image border that touch the breast, and
+    the outer ``border`` mask pixels on every side are left out first, for the
+    bright film edges of scanned mammograms.
+
+    Raises ValueError for invalid arguments or a mask with no region.
+    """
+    if opening < 0 or border < 0:
+        raise ValueError("opening at least 0 and border at least 0")
+    mask = mask.copy()
     if border:
         mask[:border] = mask[-border:] = False
         mask[:, :border] = mask[:, -border:] = False
@@ -113,10 +138,63 @@ def breast_region(
         )
     regions, count = ndimage.label(mask, structure=np.ones((3, 3)))
     if count == 0:
-        raise ValueError(f"no breast found: no region of pixels above {threshold}")
+        raise ValueError("no breast found: no region of pixels above the threshold")
     sizes = np.bincount(regions.ravel())[1:]
     region: npt.NDArray[np.bool_] = regions == int(sizes.argmax()) + 1
     return region
+
+
+class Edges(NamedTuple):
+    """Mask pixels at the top, bottom and far side (away from the chest wall) that
+    are film edge, not breast."""
+
+    top: int
+    bottom: int
+    far: int
+
+
+def film_edges(
+    mask: npt.NDArray[np.bool_],
+    depth: float,
+    coverage: float = DEFAULT_FILM_EDGE_COVERAGE,
+    wall_on_right: bool = False,
+) -> Edges:
+    """The bright film edges along the border of a ``bright_mask``.
+
+    The edge of a scanned film is a thin band along a side of the image whose rows
+    (top, bottom) or columns (the side away from the chest wall) are almost all
+    bright, which the breast is not. On each of the three sides away from the
+    chest wall, the rows or columns from the image edge inward whose share of
+    bright pixels is above ``coverage`` are a film edge, when they end within
+    ``depth`` of the side; a deeper run is tissue, such as the axilla filling the
+    top of an MLO view, and counts as none. The chest-wall side is left alone: the
+    breast and the pectoral muscle touch it.
+    """
+    rows, cols = mask.shape
+
+    def band(profile: npt.NDArray[np.float64], length: int) -> int:
+        bright = profile > coverage
+        run = len(bright) if bright.all() else int(bright.argmin())
+        return run if run <= int(depth * length) else 0
+
+    by_row, by_column = mask.mean(axis=1), mask.mean(axis=0)
+    far = by_column if wall_on_right else by_column[::-1]
+    return Edges(band(by_row, rows), band(by_row[::-1], rows), band(far, cols))
+
+
+def clear_edges(
+    mask: npt.NDArray[np.bool_], edges: Edges, wall_on_right: bool
+) -> npt.NDArray[np.bool_]:
+    """A copy of ``mask`` with the ``edges`` cleared."""
+    cleared = mask.copy()
+    rows, cols = mask.shape
+    cleared[: edges.top] = False
+    cleared[rows - edges.bottom :] = False
+    if wall_on_right:
+        cleared[:, : edges.far] = False
+    else:
+        cleared[:, cols - edges.far :] = False
+    return cleared
 
 
 def region_bbox(
@@ -167,6 +245,42 @@ def breast_bbox(
     return region_bbox(region, (pixels.shape[0], pixels.shape[1]), downscale, margin)
 
 
+class Breast(NamedTuple):
+    """What ``find_breast`` finds, on every ``downscale``-th pixel of an image."""
+
+    region: npt.NDArray[np.bool_]  # the breast, for the crop box
+    flipped: bool  # the chest wall is on the right, so the image is flipped
+    # The bright pixels the region was found in, film edges and border left out.
+    bright: npt.NDArray[np.bool_]
+
+
+def kept_area(
+    breast: Breast, shape: Shape, downscale: int, widen: int
+) -> npt.NDArray[np.bool_]:
+    """The pixels of an image of ``shape`` that clearing the background keeps.
+
+    The breast region is opened, which removes the speckle of dim tissue at the
+    chest wall and the skin; that tissue is kept here: the bright pixels whose
+    gaps of up to ``KEPT_CLOSING`` mask pixels are closed and holes filled, where
+    they are connected to the region. Labels and markers apart from the breast are
+    not. The result is widened by ``widen`` mask pixels, so the dim skin line is
+    kept, and scaled up to ``shape``.
+    """
+    closed = ndimage.binary_closing(
+        breast.bright, structure=np.ones((3, 3)), iterations=KEPT_CLOSING
+    )
+    filled = ndimage.binary_fill_holes(closed | breast.region)
+    parts, _ = ndimage.label(filled, structure=np.ones((3, 3)))
+    area = np.isin(parts, np.unique(parts[breast.region]))
+    if widen:
+        area = ndimage.binary_dilation(
+            area, structure=np.ones((3, 3)), iterations=widen
+        )
+    full = np.repeat(np.repeat(area, downscale, axis=0), downscale, axis=1)
+    kept: npt.NDArray[np.bool_] = full[: shape[0], : shape[1]]
+    return kept
+
+
 def chest_wall_on_right(
     pixels: npt.NDArray[np.number[Any]],
     region: npt.NDArray[np.bool_],
@@ -204,6 +318,14 @@ class PreprocessingSettings:
     # How the side of the chest wall is known: from the laterality (right breasts
     # are flipped) or from the image (``chest_wall_on_right``).
     orientation: Literal["laterality", "image"] = "laterality"
+    # Film edges (``film_edges``): the depth, as a share of the side, up to which a
+    # band of rows or columns with more than ``film_edge_coverage`` bright pixels is
+    # cleared before finding the breast; 0 is off.
+    film_edge_depth: Annotated[float, Field(ge=0, lt=1)] = 0.0
+    film_edge_coverage: Annotated[float, Field(gt=0, le=1)] = DEFAULT_FILM_EDGE_COVERAGE
+    # Set the pixels outside the breast region, widened by this many mask pixels,
+    # to 0 before cropping, which removes labels and markers; None keeps them.
+    clear_background: Annotated[int, Field(ge=0)] | None = None
 
 
 @dataclass(frozen=True, config=_CONFIG)
@@ -282,6 +404,39 @@ def _resize(
     return np.asarray(resized, dtype=np.float32)
 
 
+def find_breast(
+    pixels: npt.NDArray[np.number[Any]],
+    laterality: Literal["L", "R"],
+    settings: PreprocessingSettings = PreprocessingSettings(),  # noqa: B008
+) -> Breast:
+    """The ``breast_region`` of an image, whether its chest wall is on the right
+    (so the image is flipped) and the bright pixels, as ``settings`` say.
+
+    With ``settings.film_edge_depth``, the film edges on the three sides away from
+    the chest wall (``film_edges``) are cleared and the region found again.
+    Raises ValueError for an image with no breast or an unknown laterality.
+    """
+    if laterality not in ("L", "R"):
+        raise ValueError(f"laterality must be L or R, got {laterality!r}")
+    bright = bright_mask(pixels, settings.threshold, settings.downscale)
+    region = largest_region(bright, settings.opening, settings.border)
+    if settings.orientation == "laterality":
+        flipped = laterality == FLIPPED_LATERALITY
+    else:
+        flipped = chest_wall_on_right(pixels, region, settings.downscale)
+    if settings.film_edge_depth:
+        edges = film_edges(
+            bright, settings.film_edge_depth, settings.film_edge_coverage, flipped
+        )
+        bright = clear_edges(bright, edges, flipped)
+        region = largest_region(bright, settings.opening, settings.border)
+    if settings.border:
+        bright = bright.copy()
+        bright[: settings.border] = bright[-settings.border :] = False
+        bright[:, : settings.border] = bright[:, -settings.border :] = False
+    return Breast(region, flipped, bright)
+
+
 def preprocess(
     pixels: npt.NDArray[np.number[Any]],
     laterality: Literal["L", "R"],
@@ -289,35 +444,29 @@ def preprocess(
 ) -> tuple[Pixels, PreprocessParams]:
     """Crop to the breast, rescale so the longer side is ``settings.size`` and flip
     so the chest wall is on the left: right breasts, or the images whose chest wall
-    is on the right (``settings.orientation``). Returns the image (``uint16``,
-    intensities unchanged apart from the averaging of the rescale) and what was
-    done.
+    is on the right (``settings.orientation``). With ``settings.clear_background``
+    the pixels outside the breast are set to 0 first. Returns the image
+    (``uint16``, intensities unchanged apart from the averaging of the rescale) and
+    what was done.
 
     Raises ValueError for an image with no breast or an unknown laterality.
     """
-    if laterality not in ("L", "R"):
-        raise ValueError(f"laterality must be L or R, got {laterality!r}")
-    region = breast_region(
-        pixels,
-        settings.threshold,
-        settings.downscale,
-        settings.opening,
-        settings.border,
-    )
-    box = region_bbox(
-        region, (pixels.shape[0], pixels.shape[1]), settings.downscale, settings.margin
-    )
+    breast = find_breast(pixels, laterality, settings)
+    region, flipped = breast.region, breast.flipped
+    source_shape = (pixels.shape[0], pixels.shape[1])
+    box = region_bbox(region, source_shape, settings.downscale, settings.margin)
+    if settings.clear_background is not None:
+        kept = kept_area(
+            breast, source_shape, settings.downscale, settings.clear_background
+        )
+        pixels = np.where(kept, pixels, 0)
     shape = target_shape(box.height, box.width, settings.size)
     resized = _resize(box.crop(pixels), shape)
     result = np.clip(np.rint(resized), 0, np.iinfo(np.uint16).max).astype(np.uint16)
-    if settings.orientation == "laterality":
-        flipped = laterality == FLIPPED_LATERALITY
-    else:
-        flipped = chest_wall_on_right(pixels, region, settings.downscale)
     if flipped:
         result = np.ascontiguousarray(result[:, ::-1])
     params = PreprocessParams(
-        source_shape=(pixels.shape[0], pixels.shape[1]),
+        source_shape=source_shape,
         box=box,
         shape=shape,
         flipped=flipped,
