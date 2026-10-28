@@ -36,7 +36,7 @@ def test_the_test_squares_have_the_area_asked_for() -> None:
 def test_the_defaults_are_those_of_the_dataset() -> None:
     assert DEFAULT_SMALL_MASS_MM2 == 100.0
     assert DEFAULT_DENSE_ACR == 3
-    assert Stratification() == Stratification(100.0, 3)
+    assert Stratification() == Stratification(100.0, 3, 40_000.0)
 
 
 @pytest.mark.parametrize(
@@ -46,6 +46,7 @@ def test_the_defaults_are_those_of_the_dataset() -> None:
         {"dense_acr": 0},
         {"dense_acr": 5},
         {"dense_acr": "3"},
+        {"small_mass_px": 0.0},
     ],
 )
 def test_invalid_stratification_settings_are_rejected(
@@ -112,12 +113,19 @@ def test_the_threshold_is_in_square_millimetres_not_pixels() -> None:
     assert fine.small_mass and not coarse.small_mass
 
 
-def test_a_mass_of_unknown_size_in_mm2_is_an_error() -> None:
-    image = replace(make_image(1, 1, masses=1), pixel_size_mm=None)
-    with pytest.raises(ValueError, match="the pixel size is unknown"):
-        patient_profiles([image])
+def test_a_mass_of_unknown_pixel_size_is_small_by_its_pixels() -> None:
+    side = math.sqrt(30_000)
+    roi = Roi(LesionType.MASS, ((0.0, 0.0), (side, 0.0), (side, side), (0.0, side)))
+    image = replace(make_image(1, 1), pixel_size_mm=None, rois=(roi,))
+    (profile,) = patient_profiles([image])
+    assert profile.has_mass and profile.small_mass  # 30,000 < 40,000 pixels
+    assert profile.smallest_mass_mm2 is None  # no area in mm² without a pixel size
+    (larger,) = patient_profiles([image], Stratification(small_mass_px=20_000))
+    assert larger.has_mass and not larger.small_mass
+    assert larger.group == ("mass", "large", "fatty")
     # Without a mass, the pixel size is not needed.
-    assert patient_profiles([replace(make_image(1, 1), pixel_size_mm=None)])
+    (none,) = patient_profiles([replace(make_image(1, 1), pixel_size_mm=None)])
+    assert not none.has_mass
 
 
 def test_only_mass_rois_count() -> None:

@@ -1,5 +1,10 @@
 """Patient-level splits of the manifest: an optional test set and K folds.
 
+The test set is either a stratified share of the patients (``--test-fraction``,
+INbreast) or the dataset's own test set (``--official-test``, CBIS-DDSM: the
+patients of the images whose ``official_split`` is ``test``); the folds are made
+from the other patients.
+
 All images of a patient go to the same set, so near-identical views of the same
 lesion never leak between training and evaluation. Patients are stratified on
 their stratum (see ``strata.py``): with or without a mass, a small mass or not,
@@ -17,7 +22,8 @@ stratification settings, the stratum of every patient and a fingerprint of the
 manifest they were made from, so a later step can refuse splits that do not belong
 to its manifest.
 
-Run it with ``python -m mammo_seg.data.splits --folds 5 [--test-fraction 0.2]``.
+Run it with ``python -m mammo_seg.data.splits --folds 5 [--test-fraction 0.2]``, or
+``--dataset cbis-ddsm --folds 5 --official-test``.
 """
 
 import argparse
@@ -33,8 +39,8 @@ from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic.dataclasses import dataclass
 
 from mammo_seg.data.manifest import read_manifest
-from mammo_seg.data.paths import INBREAST_PROCESSED_DIR
-from mammo_seg.data.schema import ImageRecord, Manifest, View, image_to_json
+from mammo_seg.data.paths import INBREAST_PROCESSED_DIR, PROCESSED_DIRS
+from mammo_seg.data.schema import Dataset, ImageRecord, Manifest, View, image_to_json
 from mammo_seg.data.splitting import Patient, hold_out, stratified_folds
 from mammo_seg.data.strata import (
     Group,
@@ -119,23 +125,51 @@ def _patients(groups: dict[str, Group], min_size: int) -> list[Patient]:
     return [Patient(patient_id, merged[patient_id]) for patient_id in sorted(merged)]
 
 
+def official_test_patients(images: Sequence[ImageRecord]) -> tuple[str, ...]:
+    """The patients of the dataset's own test set, sorted.
+
+    Raises ValueError for an image without an official split or a patient with
+    images in both the official train and test sets, which would leak.
+    """
+    split_of: dict[str, set[str]] = {}
+    for image in images:
+        if image.official_split is None:
+            raise ValueError(f"image {image.file_id} has no official split")
+        split_of.setdefault(image.patient_id, set()).add(image.official_split)
+    both = sorted(patient for patient, sets in split_of.items() if len(sets) > 1)
+    if both:
+        raise ValueError(
+            f"patients with images in both official sets: {both}; the official "
+            "split would leak"
+        )
+    test = tuple(sorted(p for p, sets in split_of.items() if sets == {TEST}))
+    if not test:
+        raise ValueError("the official test set is empty")
+    return test
+
+
 def make_splits(
     manifest: Manifest,
     n_folds: int,
     test_fraction: float | None = None,
     seed: int = DEFAULT_SEED,
     stratification: Stratification = Stratification(),  # noqa: B008
+    official_test: bool = False,
 ) -> Splits:
     """Split the patients of the manifest into K folds, with an optional test set.
 
     With ``test_fraction`` set, that share of the patients is held out first, then
-    the rest is split into folds; without it, all patients go into the folds. Both
-    steps are stratified on the patients' strata, merged where a stratum has too
-    few patients for the sets. Raises ValueError for invalid arguments or strata
-    too small to stratify even after merging.
+    the rest is split into folds; with ``official_test``, the dataset's own test
+    set is held out (``official_test_patients``); with neither, all patients go
+    into the folds. The hold-out and the folds are stratified on the patients'
+    strata, merged where a stratum has too few patients for the sets. Raises
+    ValueError for invalid arguments, both kinds of test set, or strata too small
+    to stratify even after merging.
     """
     if n_folds < 2:
         raise ValueError(f"at least 2 folds are needed, got {n_folds}")
+    if official_test and test_fraction is not None:
+        raise ValueError("use a test fraction or the official test set, not both")
     images = select_images(manifest)
     excluded = tuple(
         sorted(
@@ -144,7 +178,11 @@ def make_splits(
     )
     groups = patient_groups(images, stratification)
     test: tuple[str, ...] = ()
-    if test_fraction is not None:
+    if official_test:
+        test = official_test_patients(images)
+        held = set(test)
+        groups = {p: group for p, group in groups.items() if p not in held}
+    elif test_fraction is not None:
         # The test set and every fold need a patient of each stratum.
         train, test = hold_out(_patients(groups, n_folds + 1), test_fraction, seed)
         groups = {patient_id: groups[patient_id] for patient_id in train}
@@ -209,6 +247,8 @@ class SplitsFile:
     # "mass/small/dense".
     strata: dict[str, str]
     splits: Splits
+    # The test set is the dataset's own (CBIS-DDSM); False in files made before.
+    official_test: bool = False
 
     @model_validator(mode="after")
     def _check_consistent(self) -> Self:
@@ -221,8 +261,14 @@ class SplitsFile:
             raise ValueError(
                 f"the test fraction must be between 0 and 1, got {self.test_fraction}"
             )
-        if (self.test_fraction is None) != (not self.splits.test_patients):
-            raise ValueError("there is a test set exactly when a test fraction is set")
+        if self.official_test and self.test_fraction is not None:
+            raise ValueError("a test fraction and the official test set, not both")
+        asked = self.test_fraction is not None or self.official_test
+        if asked != bool(self.splits.test_patients):
+            raise ValueError(
+                "there is a test set exactly when a test fraction or the official "
+                "test set is asked for"
+            )
         if set(self.strata) != set(self.splits.split_of_patient()):
             raise ValueError("the strata must name exactly the patients of the splits")
         return self
@@ -246,6 +292,7 @@ def create_splits_file(
     test_fraction: float | None = None,
     seed: int = DEFAULT_SEED,
     stratification: Stratification = Stratification(),  # noqa: B008
+    official_test: bool = False,
 ) -> SplitsFile:
     """Make the splits of a manifest and record how they were made."""
     groups = patient_groups(select_images(manifest), stratification)
@@ -257,7 +304,10 @@ def create_splits_file(
         test_fraction=test_fraction,
         stratification=stratification,
         strata={patient_id: group_name(group) for patient_id, group in groups.items()},
-        splits=make_splits(manifest, n_folds, test_fraction, seed, stratification),
+        splits=make_splits(
+            manifest, n_folds, test_fraction, seed, stratification, official_test
+        ),
+        official_test=official_test,
     )
 
 
@@ -298,28 +348,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Make patient-level stratified splits of the manifest."
     )
     parser.add_argument("--folds", type=int, required=True, help="number of folds")
-    parser.add_argument(
+    test_set = parser.add_mutually_exclusive_group()
+    test_set.add_argument(
         "--test-fraction",
         type=float,
         default=None,
         help="share of patients to hold out as a test set (default: no test set)",
     )
+    test_set.add_argument(
+        "--official-test",
+        action="store_true",
+        help="hold out the dataset's own test set (CBIS-DDSM)",
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--dataset", choices=list(PROCESSED_DIRS), default="inbreast")
+    parser.add_argument(
+        "--manifest", type=Path, help="default: data/processed/<dataset>/manifest.json"
+    )
+    parser.add_argument(
+        "--output", type=Path, help="default: data/processed/<dataset>/splits.json"
+    )
     args = parser.parse_args(argv)
+    dataset: Dataset = args.dataset
+    output = args.output or PROCESSED_DIRS[dataset] / "splits.json"
 
     try:
-        manifest = read_manifest(args.manifest)
+        manifest = read_manifest(
+            args.manifest or PROCESSED_DIRS[dataset] / "manifest.json"
+        )
         splits_file = create_splits_file(
-            manifest, args.folds, args.test_fraction, args.seed
+            manifest,
+            args.folds,
+            args.test_fraction,
+            args.seed,
+            official_test=args.official_test,
         )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    write_splits(splits_file, args.output)
+    write_splits(splits_file, output)
     summary = split_summary(splits_frame(manifest, splits_file.splits))
-    print(f"Wrote {args.output}")
+    print(f"Wrote {output}")
     print(summary.to_string())
     print("\nPatients per stratum:")
     print(strata_summary(splits_file).to_string())

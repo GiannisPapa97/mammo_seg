@@ -1,6 +1,6 @@
 # Data pipeline
 
-How the raw INbreast release is turned into training data. The facts about the raw data are in [dataset.md](dataset.md) (INbreast) and [dataset-cbis-ddsm.md](dataset-cbis-ddsm.md) (CBIS-DDSM); this document describes the code. It grows as the pipeline steps are added. For CBIS-DDSM the manifest, the masks and the preprocessing are built so far; the splits and the later steps read INbreast.
+How the raw INbreast release is turned into training data. The facts about the raw data are in [dataset.md](dataset.md) (INbreast) and [dataset-cbis-ddsm.md](dataset-cbis-ddsm.md) (CBIS-DDSM); this document describes the code. It grows as the pipeline steps are added. For CBIS-DDSM the manifest, the masks, the preprocessing and the splits are built so far; training reads INbreast.
 
 Raw data lives in `data/raw/<dataset>/` and is read-only. Everything derived goes to `data/processed/<dataset>/`. Both are git-ignored. For INbreast these are `data/raw/inbreast/` and `data/processed/inbreast/`, the defaults of every step (`src/mammo_seg/data/paths.py`).
 
@@ -126,6 +126,7 @@ The manifest of the Kaggle copy has 410 images, 108 patients, 7316 ROIs and 107 
 ```bash
 uv run python -m mammo_seg.data.splits --folds 5                      # 5 folds
 uv run python -m mammo_seg.data.splits --folds 5 --test-fraction 0.2  # hold out 20% first
+uv run python -m mammo_seg.data.splits --dataset cbis-ddsm --folds 5 --official-test
 ```
 
 Arguments:
@@ -134,8 +135,10 @@ Arguments:
 |---|---|
 | `--folds K` | Number of cross-validation folds (required, at least 2) |
 | `--test-fraction F` | Share of patients to hold out as a test set, between 0 and 1. Off by default; without it all patients go into the folds |
+| `--official-test` | Hold out the dataset's own test set instead: the patients of the images whose `official_split` is `test` (CBIS-DDSM). Not with `--test-fraction` |
 | `--seed N` | Random seed (default 0) |
-| `--manifest`, `--output` | Input manifest (default `data/processed/inbreast/manifest.json`) and output file (default `data/processed/inbreast/splits.json`) |
+| `--dataset` | `inbreast` (default) or `cbis-ddsm`: the folder of the default paths |
+| `--manifest`, `--output` | Input manifest (default `data/processed/<dataset>/manifest.json`) and output file (default `data/processed/<dataset>/splits.json`) |
 
 Code, in `src/mammo_seg/data/`: `strata.py` (the stratum of every patient), `splitting.py` (the stratified splitting of patients) and `splits.py` (splits from the manifest, the file format and the command).
 
@@ -147,9 +150,9 @@ Code, in `src/mammo_seg/data/`: `strata.py` (the stratum of every patient), `spl
    - for a patient with a mass: whether any of the masses, in any image, is smaller than 100 mm² (`small`, `large`);
    - whether any image of the patient has an ACR density of 3 or 4 (`dense`, `fatty`); the one image without a density counts as neither.
 
-   For example `mass/small/dense` or `no_mass/fatty`. Mass areas are in mm², from the outlines at the native pixel size of each image in the manifest (0.07 mm for INbreast, see `dataset.md`), not in preprocessed pixels, whose size varies with the breast box.
+   For example `mass/small/dense` or `no_mass/fatty`. Mass areas are in mm², from the outlines at the native pixel size of each image in the manifest (0.07 mm for INbreast, see `dataset.md`), not in preprocessed pixels, whose size varies with the breast box. For an image of unknown pixel size (CBIS-DDSM) a mass is small below 40,000 native pixels (`small_mass_px`), 100 mm² at about 0.05 mm per pixel: only to balance the sets, not a measurement.
 3. A stratum needs at least one patient for every set. A stratum with too few patients is merged with its neighbours by dropping its last factor (for example `mass/small/dense` and `mass/small/fatty` become `mass/small`), until every stratum is large enough or only the first factor is left.
-4. With `--test-fraction`, that share of patients is held out first, stratified on the strata merged to at least K + 1 patients (one for the test set and one per fold). The rest is split into K folds with scikit-learn's `StratifiedKFold`, stratified on the strata merged again, to at least K patients. Every set then gets about the same mix of patients and about the same size.
+4. With `--official-test`, the patients of the dataset's own test set are held out first; it is an error if an image has no official split, if a patient has images in both official sets, or if the test set is empty. With `--test-fraction`, that share of patients is held out first, stratified on the strata merged to at least K + 1 patients (one for the test set and one per fold). The rest is split into K folds with scikit-learn's `StratifiedKFold`, stratified on the strata merged again, to at least K patients. Every set then gets about the same mix of patients and about the same size.
 5. Each image gets the set of its patient: `fold_<i>`, `test` or `excluded`.
 
 The result does not depend on the order of the patients or images, and the same manifest, arguments and seed give the same file. The command prints the patients, images and images with a mass per set, and the patients of every stratum per set.
@@ -169,6 +172,17 @@ On the real manifest, 5 folds with a 20% test set give 22 test patients (10 with
 
 Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; the median mass area of the sets is 126 to 294 mm². Normal images (BI-RADS 1) are not a stratum and still vary, from 4 to 14 per set.
 
+**CBIS-DDSM.** Every patient has a mass, so the first factor is the same for all, and the strata are the size of the smallest mass in pixels and the density. With `--folds 5 --official-test`, the official test set keeps its 196 patients (348 images), and the 657 patients of the official training set go into folds of 131 or 132 patients (216 to 245 images; most patients have 2 images, some 1, 3 or 4):
+
+| Stratum | Patients | Test set | Per fold |
+|---|---|---|---|
+| `mass/large/fatty` | 320 | 72 | 49 or 50 |
+| `mass/large/dense` | 235 | 60 | 35 |
+| `mass/small/fatty` | 203 | 44 | 31 or 32 |
+| `mass/small/dense` | 95 | 20 | 15 |
+
+The official test set was not made to match the training set, and it does not quite: it has more dense breasts (ACR 4: 13% of the images against 9%), more benign masses (malignant: 40% of the masses against 50%) and slightly subtler ones (subtlety 5: 37% against 42%), with the same views and mass sizes (see [dataset-cbis-ddsm.md](dataset-cbis-ddsm.md)). Its score is therefore likely somewhat pessimistic; the results that matter are scored on INbreast.
+
 ### Format
 
 `splits.json` records the splits and how they were made. It is validated by pydantic like the manifest.
@@ -180,19 +194,22 @@ Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; 
   "seed": 0,
   "n_folds": 5,
   "test_fraction": 0.2,
-  "stratification": {"small_mass_mm2": 100.0, "dense_acr": 3},
+  "stratification": {"small_mass_mm2": 100.0, "dense_acr": 3, "small_mass_px": 40000.0},
   "strata": {"036aff49b8ac84f0": "mass/small/dense", "...": "..."},
   "splits": {
     "test_patients": ["036aff49b8ac84f0", "..."],
     "folds": [["...", "..."], ["...", "..."]],
     "excluded_images": ["50994300"]
-  }
+  },
+  "official_test": false
 }
 ```
 
 - `manifest_fingerprint` is a SHA-256 hash of the manifest content. `check_manifest(splits_file, manifest)` returns the splits only if they were made from that manifest, and raises an error otherwise, so a step never uses splits that belong to another manifest.
 - `stratification` holds the thresholds of the strata, and `strata` the stratum of every patient of the splits, before any merging.
-- The file is rejected if a patient is in two sets, a fold is empty, `n_folds` does not match the number of folds, a test set exists without a test fraction (or the reverse), or `strata` does not name exactly the patients of the splits.
+- `official_test` is true when the test set is the dataset's own (CBIS-DDSM); `test_fraction` is then null.
+- The file is rejected if a patient is in two sets, a fold is empty, `n_folds` does not match the number of folds, a test set exists without a test fraction or the official test set (or the reverse), both are set, or `strata` does not name exactly the patients of the splits.
+- `small_mass_px` and `official_test` came with CBIS-DDSM, in the same version 3: a file written before reads with their defaults, and the INbreast splits made again are the same, with the two keys more.
 - Version 2 is the first with strata. A file of version 1 (stratified on masses only) is rejected, so make the splits again; its folds differ from the new ones.
 - Version 3 takes the pixel size from the manifest (version 2) instead of a stratification setting. A file of version 2 is rejected; making the splits again with the same arguments gives the same folds, with a new fingerprint of the manifest.
 - `read_splits(path)` reads it, `splits_frame(manifest, splits)` gives one row per image with its set, `split_summary(frame)` counts patients and images per set, and `strata_summary(splits_file)` counts the patients of every stratum per set.

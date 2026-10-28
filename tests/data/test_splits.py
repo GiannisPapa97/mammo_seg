@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 from tests.data.manifests import make_image, make_manifest, pid
@@ -11,6 +11,7 @@ from mammo_seg.data.splits import (
     Splits,
     fold_name,
     make_splits,
+    official_test_patients,
     patient_groups,
     select_images,
     split_summary,
@@ -294,3 +295,43 @@ def test_the_stratification_settings_change_the_strata() -> None:
     assert make_splits(manifest, 2, stratification=big) != make_splits(
         manifest, 2, seed=1, stratification=big
     )
+
+
+def with_official_splits(manifest: Manifest, test: set[str]) -> Manifest:
+    images = tuple(
+        replace(image, official_split="test" if image.patient_id in test else "train")
+        for image in manifest.images
+    )
+    return replace(manifest, images=images)
+
+
+def test_the_official_test_set_is_the_patients_of_its_images() -> None:
+    manifest = with_official_splits(make_manifest(4, 4), {pid(1), pid(6)})
+    assert official_test_patients(manifest.images) == (pid(1), pid(6))
+    splits = make_splits(
+        with_official_splits(make_manifest(20, 30), {pid(0), pid(25)}),
+        n_folds=4,
+        official_test=True,
+    )
+    assert splits.test_patients == (pid(0), pid(25))
+    assert not {pid(0), pid(25)} & {p for fold in splits.folds for p in fold}
+
+
+def test_an_image_without_an_official_split_is_an_error() -> None:
+    manifest = make_manifest(2, 2)
+    with pytest.raises(ValueError, match="image 00000000 has no official split"):
+        official_test_patients(manifest.images)
+
+
+def test_a_patient_in_both_official_sets_is_an_error() -> None:
+    manifest = with_official_splits(make_manifest(2, 2), set())
+    images = list(manifest.images)
+    images[0] = replace(images[0], official_split="test")
+    with pytest.raises(ValueError, match=f"both official sets: \\['{pid(0)}'\\]"):
+        official_test_patients(images)
+
+
+def test_an_empty_official_test_set_is_an_error() -> None:
+    manifest = with_official_splits(make_manifest(2, 2), set())
+    with pytest.raises(ValueError, match="the official test set is empty"):
+        official_test_patients(manifest.images)

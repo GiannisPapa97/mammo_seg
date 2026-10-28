@@ -2,7 +2,7 @@
 
 Findings on the raw data in `data/raw/cbis-ddsm/`, from exploration scripts and the manifest built by `mammo_seg.data.cbis_ddsm` (see [data-pipeline.md](data-pipeline.md)). Only aggregate figures are given. Source: [awsaf49/cbis-ddsm-breast-cancer-image-dataset](https://www.kaggle.com/datasets/awsaf49/cbis-ddsm-breast-cancer-image-dataset) on Kaggle, which repackages the CBIS-DDSM collection of The Cancer Imaging Archive (TCIA) as JPEG images. CBIS-DDSM (Curated Breast Imaging Subset of DDSM) is a curated part of the Digital Database for Screening Mammography: scanned film mammograms.
 
-**Scope:** the project uses the **masses** of CBIS-DDSM, to pretrain before INbreast. The manifest, the masks and the preprocessing are built so far ([data-pipeline.md](data-pipeline.md)); the splits do not read it yet.
+**Scope:** the project uses the **masses** of CBIS-DDSM, to pretrain before INbreast. The manifest, the masks, the preprocessing and the splits are built so far ([data-pipeline.md](data-pipeline.md)); training does not read it yet.
 
 ## License and use
 
@@ -59,6 +59,21 @@ As for INbreast, no samples go in the repository, tests or docs, and `data/` sta
 | All | 1,514 | 1,618 | 853 |
 
 Every image has a mass (1,443 have one, 71 two to six). 768 masses are malignant, 709 benign and 141 benign without callback. The shape is `N/A` for 4 masses and the margins for 60.
+
+## The official train and test sets
+
+No patient is in both. The test set was not made to match the training set: it has the same views and mass sizes, but more dense breasts, more benign masses and slightly subtler ones.
+
+| | Train | Test |
+|---|---|---|
+| CC / MLO | 46% / 54% | 47% / 53% |
+| Median mass size, share of the image | 0.355% | 0.355% |
+| Images with 2 or more masses | 5.0% | 3.7% |
+| Density ACR 1 / 2 / 3 / 4 (images) | 20 / 44 / 27 / 9% | 13 / 46 / 28 / 13% |
+| Malignant / benign / benign without callback (masses) | 50 / 42 / 8% | 40 / 50 / 10% |
+| Subtlety 5, the most obvious (masses) | 42% | 37% |
+
+The splits keep this test set and make 5 patient folds of the training set (see [data-pipeline.md](data-pipeline.md#2-patient-splits)).
 
 ## What it does not have
 

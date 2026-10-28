@@ -81,5 +81,5 @@ def development_ids(manifest: Manifest, splits_file: SplitsFile) -> tuple[str, .
 def held_out_ids(manifest: Manifest, splits_file: SplitsFile) -> tuple[str, ...]:
     """The images of the held-out test set; ValueError if there is none."""
     if not splits_file.splits.test_patients:
-        raise ValueError("these splits have no test set (no test fraction was set)")
+        raise ValueError("these splits have no test set")
     return tuple(_ids_by_set(manifest, splits_file).get(TEST, []))
