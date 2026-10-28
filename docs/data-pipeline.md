@@ -1,6 +1,6 @@
 # Data pipeline
 
-How the raw INbreast release is turned into training data. The facts about the raw data are in [dataset.md](dataset.md) (INbreast) and [dataset-cbis-ddsm.md](dataset-cbis-ddsm.md) (CBIS-DDSM); this document describes the code. It grows as the pipeline steps are added. For CBIS-DDSM only the manifest is built so far; the later steps read INbreast.
+How the raw INbreast release is turned into training data. The facts about the raw data are in [dataset.md](dataset.md) (INbreast) and [dataset-cbis-ddsm.md](dataset-cbis-ddsm.md) (CBIS-DDSM); this document describes the code. It grows as the pipeline steps are added. For CBIS-DDSM the manifest, the masks and the preprocessing are built so far; the splits and the later steps read INbreast.
 
 Raw data lives in `data/raw/<dataset>/` and is read-only. Everything derived goes to `data/processed/<dataset>/`. Both are git-ignored. For INbreast these are `data/raw/inbreast/` and `data/processed/inbreast/`, the defaults of every step (`src/mammo_seg/data/paths.py`).
 
@@ -211,13 +211,14 @@ Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; 
 
 ## 3. Masks
 
-**Goal:** a binary segmentation mask for every image, drawn from the mass polygons of the manifest, because the raw data has no mask images.
+**Goal:** a binary segmentation mask for every image: drawn from the mass polygons of the manifest for INbreast, whose raw data has no mask images, and read from the mask images of the masses for CBIS-DDSM.
 
 ```bash
-uv run python -m mammo_seg.data.masks
+uv run python -m mammo_seg.data.masks                       # INbreast, the default
+uv run python -m mammo_seg.data.masks --dataset cbis-ddsm   # CBIS-DDSM
 ```
 
-It reads `data/processed/inbreast/manifest.json` and writes `data/processed/inbreast/masks/<file_id>.png` for every image (`--manifest` and `--output-dir` change the paths). It takes about two minutes, mostly for writing the PNG files. Code: `src/mammo_seg/data/masks.py`.
+It reads `data/processed/<dataset>/manifest.json` and writes `data/processed/<dataset>/masks/<file_id>.png` for every image (`--manifest`, `--dataset-dir` and `--output-dir` change the paths). For INbreast it takes about two minutes, mostly for writing the PNG files. Code: `src/mammo_seg/data/masks.py`.
 
 ### Format
 
@@ -232,6 +233,10 @@ It reads `data/processed/inbreast/manifest.json` and writes `data/processed/inbr
 - Polygons that leave the image are clipped to it. This affects 3 of the 116 masses, which stick out by a few pixels.
 - The polygons are drawn as annotated. For 12 of the 116 masses, spiky vertices leave isolated specks of 1 to 47 pixels next to the main region (which has 8,000 to 130,000 pixels); they are kept in the mask.
 
+### Mask images (CBIS-DDSM)
+
+An ROI with a `mask_path` is read from the raw dataset folder with `cbis_ddsm.read_lesion_mask`: a pixel above 127 of the mask JPEG is mass, as in the manifest. The masks of all masses of an image are merged, like the polygons. Only masses are read. `write_masks` checks that every mask image can be read, is nearly binary and grey (as the manifest builder does), has the shape of the image and has exactly the `mask_area_px` of the manifest; an image whose lesions are mask images needs the dataset folder (`dataset_dir`, `--dataset-dir`).
+
 ### Validation
 
 `write_masks` checks every mask against its polygons, raises `MaskError` listing all problems, and does not write the masks that have one. It checks that:
@@ -245,29 +250,34 @@ It reads `data/processed/inbreast/manifest.json` and writes `data/processed/inbr
 
 410 masks: 107 non-empty (116 masses, 3 clipped to the image) and 303 empty, matching `has_mass` in the manifest. Overlays on a sample of images (including the clipped ones and an image with three masses) line up with the lesions.
 
+CBIS-DDSM: 1514 masks, all with a mass (1618 masses), each mask image with exactly the area of the manifest. They take 31 MB and about 17 minutes, for reading and writing images of up to 6931 x 5431 pixels.
+
 ### Decisions
 
-- Masses only, as agreed; calcifications and the other lesion types are not drawn.
+- Masses only, as agreed; calcifications and the other lesion types are not drawn or read.
 - Masks are stored, not generated on the fly, so they are easy to inspect and the dataset class only has to read them.
 - Like the manifest and the splits, the masks are not committed.
 
 ## 4. Preprocessing
 
-**Goal:** turn a raw 16-bit DICOM into the input of the model, in one chain that training and inference both use: read the DICOM, crop to the breast, rescale so the longer side is 1024 px and flip right breasts (done once and stored on disk), then normalize the intensities (done each time an image is loaded). Code: `src/mammo_seg/data/preprocessing.py` (the chain) and `src/mammo_seg/data/preprocess_dataset.py` (the cache on disk and the command).
+**Goal:** turn a raw image (a 16-bit INbreast DICOM, or an 8-bit CBIS-DDSM JPEG) into the input of the model, in one chain that training and inference both use: read the image, crop to the breast, rescale so the longer side is 1024 px and flip so the chest wall is on the left (done once and stored on disk), then normalize the intensities (done each time an image is loaded). Code: `src/mammo_seg/data/preprocessing.py` (the chain) and `src/mammo_seg/data/preprocess_dataset.py` (the cache on disk and the command).
 
 ```bash
-uv run python -m mammo_seg.data.preprocess_dataset            # about 3.5 minutes
-uv run python -m mammo_seg.data.preprocess_dataset --size 768  # another size
+uv run python -m mammo_seg.data.preprocess_dataset                       # INbreast, about 3.5 minutes
+uv run python -m mammo_seg.data.preprocess_dataset --size 768            # another size
+uv run python -m mammo_seg.data.preprocess_dataset --dataset cbis-ddsm   # CBIS-DDSM
 ```
+
+`--dataset` chooses the default paths (in `data/raw/<dataset>/` and `data/processed/<dataset>/`) and the settings of the dataset (`DATASET_SETTINGS`, see [CBIS-DDSM](#cbis-ddsm) below).
 
 ### The chain
 
 | Step | Function | What it does |
 |---|---|---|
-| Read | `read_pixels(path)` | The DICOM as a `uint16` array. Only what the dataset contains is accepted (one channel, unsigned up to 16 bits, `MONOCHROME2`, no rescale slope or intercept); anything else raises an error instead of being guessed |
+| Read | `read_pixels(path)` | The image as a `uint16` array. A `.jpg`, `.jpeg` or `.png` file must be 8-bit grey and keeps its values 0 to 255; a DICOM must be what INbreast contains (one channel, unsigned up to 16 bits, `MONOCHROME2`, no rescale slope or intercept). Anything else raises an error instead of being guessed |
 | Crop | `breast_bbox(pixels)` | The box around the breast, found on the raw image |
 | Rescale | `preprocess(...)` | The crop is resized so its longer side is `size` (1024), by averaging the source pixels |
-| Flip | `preprocess(...)` | Right breasts are flipped horizontally, so the chest wall is on the left in every image |
+| Flip | `preprocess(...)` | Right breasts are flipped horizontally (`orientation` `laterality`), or the images whose chest wall is on the right (`image`, found by `chest_wall_on_right`), so the chest wall is on the left in every image |
 | Normalize | `normalize_intensity(pixels)` | Scales to 0..1. Not stored: it runs when an image is loaded and at inference |
 
 `preprocess(pixels, laterality, settings)` runs crop, rescale and flip and returns the image together with a `PreprocessParams` record (the crop box, the size of the result and whether it was flipped). `preprocess_mask(mask, params)` applies the same geometry to a mask, `preprocess_points(points, params)` to points such as the polygons of the annotations, and `restore_mask(mask, params)` maps a predicted mask back onto the original image. At inference a DICOM goes through `read_pixels`, `preprocess` and `normalize_intensity`, exactly like the stored training images.
@@ -291,6 +301,13 @@ On the real data the box covers a median of 46% of the image (16% to 76%). All 4
 | `size` | 1024 | Length of the longer side after rescaling |
 | `max_intensity` | 4095 | Divisor of the normalization (the 12-bit range) |
 | `percentile` | none | If set, per-image normalization by this percentile of the tissue instead of `max_intensity` |
+| `border` | 0 | Pixels of the breast mask (on every `downscale`-th pixel) left out on every side before the breast is found |
+| `orientation` | `laterality` | How the side of the chest wall is known: from the laterality, or from the image |
+| `film_edge_depth` | 0 (off) | Bright film edges are cleared from the breast mask, on the three sides away from the chest wall, if they end within this share of the side (`clear_film_edges`) |
+| `film_edge_coverage` | 0.8 | A row or column of a film edge has more than this share of bright pixels |
+| `clear_background` | none (off) | The pixels outside the breast region, widened by this many mask pixels, are set to 0 before cropping |
+
+The five last settings came with CBIS-DDSM. A `preprocessing.json` or checkpoint written before them reads as before, with the defaults, so the INbreast data and models need no rebuild; a newly written INbreast `preprocessing.json` has these keys more, with the same values otherwise.
 
 ### Intensity normalization
 
@@ -302,7 +319,7 @@ Most images do not use the whole range. In the 410 preprocessed images the large
 
 Written to `data/processed/inbreast/preprocessed/`:
 
-- `images/<file_id>.png`: the preprocessed image, 16-bit (values unchanged apart from the averaging of the rescale). The values stay in the 12-bit range 0 to 4095 of the scanner, about a sixteenth of what a 16-bit file can hold, so an image viewer that maps 0 to 65535 to black and white shows them dark and flat. Stretch the display range to 0 to 4095 to see them normally; the model is not affected, because the values are divided by 4095 when loaded
+- `images/<file_id>.png`: the preprocessed image, 16-bit (values unchanged apart from the averaging of the rescale). The values stay in the 12-bit range 0 to 4095 of the scanner, about a sixteenth of what a 16-bit file can hold, so an image viewer that maps 0 to 65535 to black and white shows them dark and flat. Stretch the display range to 0 to 4095 to see them normally; the model is not affected, because the values are divided by 4095 when loaded. The CBIS-DDSM images keep their 8-bit values 0 to 255 in the same 16-bit files, so a viewer shows them black: stretch the range to 0 to 255, or use `notebooks/13_cbis_ddsm_preprocessing_review.ipynb`
 - `masks/<file_id>.png`: its mass mask, 8-bit with the values 0 and 255 (read it with `read_mask`)
 - `preprocessing.json`: the settings and, for every image, `PreprocessParams` (source shape, crop box, result shape, flip)
 
@@ -316,6 +333,7 @@ All 410 images are processed, including the excluded `FB` view, which is only le
 - the crop box does not cut the mask (a lesion outside the box is an error)
 - the mask is binary and has the shape of the image
 - a mask does not vanish when rescaled, and its area after rescaling is within 5% of the expected one plus half a pixel along its edge
+- with `clear_background`, the clearing erases at most 1% of a mask in tissue (mask pixels above the threshold outside the kept area; a mask drawn past the skin line onto the dark background does not count)
 
 ### On the real data
 
@@ -323,6 +341,36 @@ All 410 images are processed, including the excluded `FB` view, which is only le
 - Chest wall on the left in all 410 images (201 right breasts flipped).
 - 107 non-empty masks. The rescaled mask has 0.995 to 1.012 times the expected area, none vanishes, and a mask mapped back onto the original image overlaps the original mask with an IoU of at least 0.95 (median 0.99).
 - All 107 masks are brighter than the ring of tissue around them.
+
+### CBIS-DDSM
+
+The scanned films of CBIS-DDSM differ from the INbreast images in ways that the settings of `DATASET_SETTINGS["cbis-ddsm"]` answer, measured on all 1514 images:
+
+| Setting | INbreast | CBIS-DDSM | Why |
+|---|---|---|---|
+| `max_intensity` | 4095 | 255 | The JPEGs are 8-bit. The values are kept (0 to 255, in the same 16-bit files) and divided by 255 when loaded, so both datasets reach the model on the same 0..1 scale; widening them to 12 or 16 bits would only multiply them and add no information |
+| `threshold` | 100 | 20 | The background is near 0 (a median 52% of an image is at most 5) and tissue starts low. At 40, the crop cut up to 11 masses |
+| `border`, `opening` | 0, 1 | 2, 3 | 1449 of the images have bright film edges along the border, which touch the breast and widen the box; leaving out the outer 16 pixels and opening three times detaches many of them |
+| `film_edge_depth` | 0 (off) | 0.05 | Film edges that still touch the breast: on the three sides away from the chest wall, rows or columns from the image edge that are more than 80% bright are cleared when they end within 5% of the side. Real film edges are thin (99% within 3% of the side); a deeper bright run is tissue, such as the axilla at the top of an MLO view, and is kept |
+| `clear_background` | none (off) | 6 | Everything outside the breast is set to 0 before cropping, so labels, markers and film edges apart from the breast are gone and the background is a flat 0, as in INbreast. Kept are the breast region and the dim tissue connected to it (`kept_area`: gaps of up to 2 mask pixels closed, holes filled), widened by 6 mask pixels (48 px) for the skin line |
+| `margin` | 0.02 | 0.04 | With 2%, the crop still cut 3 masses by a few pixels: two whose masks are drawn past the dim skin line, and one at the image edge, behind the border left out. 3% keeps them |
+| `orientation` | `laterality` | `image` | The chest wall is on the side the laterality implies (left breasts on the left) in only about 70% of the images, so the side is found from the image: `chest_wall_on_right` puts it on the half of the image that holds more of the intensity of the breast region, where the breast is thickest. On all images this agrees with an independent measure (which side the breast region fills more along the edge of its box) in 1511 of 1514; in the disagreements looked at, the intensity was right and the other measure was misled by a bright film edge |
+
+The 8-bit JPEGs lost the finer grey levels of the films; nothing brings them back. The difference that matters is that of the images (scanned film against a digital detector: contrast, noise, artefacts), which the fine-tuning on INbreast is meant to bridge; per-image normalization (`percentile`) is the other lever, to compare when pretraining.
+
+How the clearing was settled:
+
+- The film edges brought the boxes that span more than 95% of the image from 223 to 30 (the median box from 72% to 70% of the image), and changed no chest-wall side.
+- Clearing only the opened breast region, widened by 16 px, erased tissue: up to 3.7% of a mass that bulges out of the breast at the skin line, and the dim speckled tissue at the chest wall, in blocks of 8 pixels. Keeping the dim tissue connected to the breast and widening by 48 px fixes both; a mass then loses at most 0.34% of its pixels to the clearing, and the check allows at most 1%.
+- Two further rules were tried for the thin white film lines along the top of many MLO views, and dropped: rows mostly near-white (the near-white tissue at the top of some views made the band too deep, so even real edges were kept), and leaving the outer 16 px out of the crop (it cut 3.5% of a mass whose outline reaches the top of the image, and left lines in 213 MLO views).
+
+On the real data (`notebooks/13_cbis_ddsm_preprocessing_review.ipynb`):
+
+- 1514 images, all 1024 px high and 196 to 855 px wide, so a canvas of 1024 x 864 (INbreast: 800 wide). 790 were flipped.
+- Chest wall on the left in all 1514 after preprocessing. The breast fills a median of 63% of the preprocessed image (40% to 83%; INbreast 71%). 30 boxes still cover more than 95% of the image, where the breast itself fills it or an edge is not a clean band.
+- Every mask is inside its box. A mask mapped back onto the original overlaps the original mask with an IoU of at least 0.916 (median 0.977): the masses are smaller against images that are scaled down about five times. 1493 of the 1514 masks are brighter than the ring of tissue around them.
+- Labels and markers apart from the breast are gone. **Known limitation:** thin bright film lines remain at the edge of some images, mostly along the top of MLO views, where a white line lies on the pectoral muscle and covers only part of the row: an outer 1% of the image much brighter than the band inside it is found at the top of 324 of the 810 MLO views and at an edge of 42 of the 704 CC views. They are about 1% of the image height, away from the masses; to revisit if they matter in training.
+- It takes about 18 to 20 minutes and 0.7 GB of memory; the images and masks take 272 MB.
 
 ### Decisions
 

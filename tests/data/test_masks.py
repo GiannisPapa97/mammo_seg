@@ -346,19 +346,85 @@ def test_write_masks_reports_every_problem_and_skips_those_masks(
     assert [path.name for path in tmp_path.iterdir()] == ["00000001.png"]
 
 
-def test_lesions_given_as_mask_images_are_refused_not_skipped(tmp_path: Path) -> None:
-    mask = Roi(LesionType.MASS, mask_path="jpeg/1.2/1-2.jpg", mask_area_px=40)
-    manifest = Manifest(
-        version=2,
-        dataset="cbis-ddsm",
-        images=(image_with(1, (rectangle(5, 5, 15, 12),)), image_with(2, (mask,))),
+def write_lesion(dataset_dir: Path, name: str, top: int, left: int) -> Roi:
+    """A 4 x 5 mass as a mask image of a 30 x 40 image, 0 and 255."""
+    pixels = np.zeros((30, 40), dtype=np.uint8)
+    pixels[top : top + 4, left : left + 5] = 255
+    path = dataset_dir / "jpeg" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(pixels).save(path)
+    return Roi(
+        LesionType.MASS,
+        mask_path=f"jpeg/{name}",
+        mask_area_px=20,
+        abnormality_id=int(name[0]),
+    )
+
+
+def cbis_manifest(*images: ImageRecord) -> Manifest:
+    return Manifest(version=2, dataset="cbis-ddsm", images=images)
+
+
+def test_mask_images_are_read_and_merged(tmp_path: Path) -> None:
+    dataset = tmp_path / "raw"
+    first = write_lesion(dataset, "1.png", 2, 3)
+    second = write_lesion(dataset, "2.png", 4, 6)  # overlaps the first
+    summary = write_masks(
+        cbis_manifest(image_with(1, (first, second))), tmp_path / "out", dataset
+    )
+    mask = read_mask(mask_path(tmp_path / "out", "00000001"))
+    expected = np.zeros((30, 40), dtype=np.uint8)
+    expected[2:6, 3:8] = expected[4:8, 6:11] = 1
+    assert np.array_equal(mask, expected)
+    assert (summary.images_with_masks, summary.masses) == (1, 2)
+    assert (summary.mask_pixels, summary.clipped_masses) == (int(expected.sum()), 0)
+
+
+def test_mask_images_of_other_lesions_are_not_read(tmp_path: Path) -> None:
+    calcification = Roi(
+        LesionType.CALCIFICATION, mask_path="jpeg/missing.png", mask_area_px=5
+    )
+    write_masks(cbis_manifest(image_with(1, (calcification,))), tmp_path, tmp_path)
+    assert not read_mask(mask_path(tmp_path, "00000001")).any()
+
+
+def test_mask_images_need_the_dataset_folder(tmp_path: Path) -> None:
+    roi = write_lesion(tmp_path / "raw", "1.png", 2, 3)
+    manifest = cbis_manifest(
+        image_with(1, (rectangle(5, 5, 15, 12),)), image_with(2, (roi,))
     )
     with pytest.raises(MaskError) as error:
-        write_masks(manifest, tmp_path)
+        write_masks(manifest, tmp_path / "out")
     assert error.value.problems == [
-        "image 00000002: its lesions are mask images, which this step does not read"
+        "image 00000002: its lesions are mask images, and no dataset folder is given"
     ]
-    assert [path.name for path in tmp_path.iterdir()] == ["00000001.png"]
+    assert [path.name for path in (tmp_path / "out").iterdir()] == ["00000001.png"]
+
+
+def test_a_mask_image_must_match_the_manifest(tmp_path: Path) -> None:
+    dataset = tmp_path / "raw"
+    wrong_area = replace(write_lesion(dataset, "1.png", 2, 3), mask_area_px=21)
+    wrong_shape = write_lesion(dataset, "2.png", 2, 3)
+    missing = replace(wrong_shape, mask_path="jpeg/missing.png", abnormality_id=3)
+    grey = replace(wrong_shape, mask_path="jpeg/grey.png", abnormality_id=4)
+    Image.fromarray(np.full((30, 40), 128, dtype=np.uint8)).save(
+        dataset / "jpeg/grey.png"
+    )
+    manifest = cbis_manifest(
+        image_with(1, (wrong_area,)),
+        image_with(2, (wrong_shape,), rows=31),
+        image_with(3, (missing, grey)),
+    )
+    with pytest.raises(MaskError) as error:
+        write_masks(manifest, tmp_path / "out", dataset)
+    problems = error.value.problems
+    assert problems[:2] == [
+        "image 00000001: mass 1: the mask has 20 pixels, the manifest says 21",
+        "image 00000002: mass 2: mask shape (30, 40) is not the image shape (31, 40)",
+    ]
+    assert problems[2].startswith("image 00000003: mass 3: [Errno 2]")
+    assert problems[3].startswith("image 00000003: mass 4: 100.00% of the pixels")
+    assert not (tmp_path / "out").exists()
 
 
 # --- the command ---
@@ -402,3 +468,27 @@ def test_main_reports_a_missing_manifest(
     )
     assert code == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_main_reads_the_mask_images_of_cbis_ddsm(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dataset = tmp_path / "raw"
+    manifest_path = tmp_path / "manifest.json"
+    roi = write_lesion(dataset, "1.png", 2, 3)
+    write_manifest(cbis_manifest(image_with(1, (roi,))), manifest_path)
+    code = main(
+        [
+            "--dataset",
+            "cbis-ddsm",
+            "--manifest",
+            str(manifest_path),
+            "--dataset-dir",
+            str(dataset),
+            "--output-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert code == 0
+    assert read_mask(mask_path(tmp_path / "out", "00000001")).sum() == 20
+    assert "1 with masses (1 masses, 0 clipped to the image)" in capsys.readouterr().out

@@ -41,3 +41,19 @@ def test_the_manifest_of_each_dataset_has_its_default_folders() -> None:
     )
     _, raw, output = manifest.DATASETS["inbreast"]
     assert (raw, output) == (manifest.DEFAULT_DATASET_DIR, manifest.DEFAULT_OUTPUT)
+
+
+def test_each_dataset_has_its_raw_and_processed_folder() -> None:
+    assert paths.RAW_DIRS == {
+        "inbreast": paths.INBREAST_RAW_DIR,
+        "cbis-ddsm": paths.CBIS_DDSM_RAW_DIR,
+    }
+    assert paths.PROCESSED_DIRS == {
+        "inbreast": paths.INBREAST_PROCESSED_DIR,
+        "cbis-ddsm": paths.CBIS_DDSM_PROCESSED_DIR,
+    }
+    for name, (_, raw, output) in manifest.DATASETS.items():
+        assert (raw, output.parent) == (
+            paths.RAW_DIRS[name],
+            paths.PROCESSED_DIRS[name],
+        )

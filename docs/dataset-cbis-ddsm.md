@@ -2,7 +2,7 @@
 
 Findings on the raw data in `data/raw/cbis-ddsm/`, from exploration scripts and the manifest built by `mammo_seg.data.cbis_ddsm` (see [data-pipeline.md](data-pipeline.md)). Only aggregate figures are given. Source: [awsaf49/cbis-ddsm-breast-cancer-image-dataset](https://www.kaggle.com/datasets/awsaf49/cbis-ddsm-breast-cancer-image-dataset) on Kaggle, which repackages the CBIS-DDSM collection of The Cancer Imaging Archive (TCIA) as JPEG images. CBIS-DDSM (Curated Breast Imaging Subset of DDSM) is a curated part of the Digital Database for Screening Mammography: scanned film mammograms.
 
-**Scope:** the project uses the **masses** of CBIS-DDSM, to pretrain before INbreast. Only the manifest is built so far; the masks, the preprocessing and the splits do not read it yet.
+**Scope:** the project uses the **masses** of CBIS-DDSM, to pretrain before INbreast. The manifest, the masks and the preprocessing are built so far ([data-pipeline.md](data-pipeline.md)); the splits do not read it yet.
 
 ## License and use
 
@@ -44,6 +44,12 @@ As for INbreast, no samples go in the repository, tests or docs, and `data/` sta
 - Masks are nearly binary: no pixel of any mask is strictly between 30 and 225, and at most 0.16% of the pixels are neither 0 nor 255 (JPEG compression at the edges). A pixel above 127 is mass.
 - A mass covers a median 0.36% of its image (from 0.017% to 5.1%; 0.13% and 1.0% at the 10th and 90th percentiles). The images are large: height 3,920 to 6,931 pixels (median 5,266), width 1,786 to 5,431 (median 3,008).
 
+## The images
+
+- Grey 8-bit JPEGs, the background near 0: a median 52% of an image is at most 5, and the tissue starts at about 20.
+- 1449 of the 1514 images have bright film edges along the border (the mean of the outer pixels of a side above 100), and many have bright labels and markers (the view written on the film, dates, rulers) in the background.
+- **The orientation does not follow the laterality.** In INbreast every left breast has its chest wall on the left of the image; here only about 70% of the images have the chest wall on the side the laterality implies (left breasts on the left, right breasts on the right), in both the train and the test set and in both views. The side has to be found from the image: the half of the image with more of the breast's intensity, checked against a second measure on all images (see the preprocessing in [data-pipeline.md](data-pipeline.md#cbis-ddsm)).
+
 ## The manifest
 
 | | Images | Masses | Patients |
@@ -56,7 +62,7 @@ Every image has a mass (1,443 have one, 71 two to six). 768 masses are malignant
 
 ## What it does not have
 
-- **No pixel size.** The JPEGs keep none, and the films of DDSM were scanned by several scanners at different resolutions. The manifest has `null`, so no step computes areas in mm² until the pixel size is settled (for the preprocessing).
+- **No pixel size.** The JPEGs keep none, and the films of DDSM were scanned by several scanners at different resolutions. The manifest has `null`, and it stays unknown: the preprocessing does not need it, and no step computes areas in mm² for CBIS-DDSM. The measures in mm² (the minimum region size, the small masses) are kept for INbreast, on which the results are scored.
 - **No acquisition date.** The dates of `dicom_info.csv` (2016 and 2017) are those of the conversion.
 - **No BI-RADS of the whole image**, only the assessment of each mass.
 - **No images without a mass.** The images with calcifications only are in the calcification CSVs, which are not read; the calcifications on the mass images are not annotated in the manifest.
