@@ -60,6 +60,8 @@ whole/evaluation_validation_details.json    # every validation image with its re
 whole/evaluation_code_version.txt           # the commit of the evaluation run
 whole/code_version.txt                      # the commits of the training sessions
 whole/comparison_with_1024.json             # the output of mammo-seg compare
+whole/evaluation_training_fold0.json        # the training-set check, all settings
+whole/evaluation_training_fold0_details.json  # every fold 0 training image with its results
 whole/fold_<k>/history.jsonl                # the training curves
 ```
 
@@ -106,6 +108,40 @@ and 0.647 for ResNet34), from the training histories. The best epoch is chosen o
 its own validation fold, so even this comparison favours it; `best.pt` against
 `last.pt` at the chosen setting is still to be evaluated.
 
+## Training-set check
+
+**Question:** does the smaller encoder memorize its training images less than
+ResNet34, as the training-set check of `2026-10-24_whole_vs_patches` found for
+ResNet34?
+
+**How:** as in that check: this run's fold 0 `last.pt` scored on its own 256
+training images, in the details format, from a cell added to
+`notebooks/12_colab_evaluation.ipynb` after its setup (the code of the script of
+the earlier checks, on the GPU). Google Colab, T4 GPU, 2026-10-28, 370 s. The
+package installed from `main`; the code under `src/` is the same as in commit
+`ed494473d5b43713ff41a1a6d936adc83e48f153` (unchanged up to
+`694ee9c9e52076c9f53766a7dc124aa57dae9eb6`). The local laptop (3.8 GB of memory)
+ran out of memory on this check.
+
+At threshold 0.4 and 10 mm², the fold 0 models on their training and validation
+images:
+
+| | 1024, training | 1024, validation | ResNet18, training | ResNet18, validation |
+|---|---|---|---|---|
+| masses under 100 mm² found | 19 of 20 | 1 of 4 | 20 of 20 | 2 of 4 |
+| masses of 100 mm² or more found | 60 of 60 | 9 of 11 | 60 of 60 | 10 of 11 |
+| Dice, images with a mass | 0.946 | 0.579 | 0.949 | 0.692 |
+| false alarms, images without a mass | 11 of 184 | 8 of 55 | 9 of 184 | 6 of 55 |
+| false regions per image | 0.047 | 0.143 | 0.039 | 0.186 |
+
+ResNet18 memorizes its training images as completely as ResNet34: all 80 masses
+found, a Dice of 0.949 with a mass, and fewer false alarms than on validation.
+The gap between training and validation Dice in fold 0 is 0.26 against 0.37, but
+fold 0 is a fold where ResNet18 did better on validation (0.579 to 0.692); over
+the 5 folds its validation Dice is the same as ResNet34's, so the narrower gap
+does not hold beyond this fold. Both small masses missed on validation got no
+response at all (a peak probability under 0.05).
+
 ## Conclusion
 
 ResNet18 is as good as ResNet34 on every metric: the same 68 of 95 masses found,
@@ -116,7 +152,8 @@ either encoder (6 or 8 of 24 found), and the two encoders find mostly the same
 large masses.
 
 So a smaller encoder neither helps nor hurts: the overfitting is not a matter of
-the size of the encoder. ResNet18 costs about 15% less time per epoch on a
+the size of the encoder, and the training-set check confirms that ResNet18 still
+fits its training images almost perfectly. ResNet18 costs about 15% less time per epoch on a
 Kaggle T4 (20 s against 24 s) and has 40% fewer parameters, so it is the cheaper choice for the next
 experiments; the 1024 run with ResNet34 stays the reference, since nothing beat
 it.
