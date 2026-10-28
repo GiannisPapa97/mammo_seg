@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -17,7 +18,13 @@ from mammo_seg.data.manifest import (
     rois_frame,
     write_manifest,
 )
-from mammo_seg.data.schema import ImageRecord, LesionType, Manifest, View
+from mammo_seg.data.schema import (
+    DroppedImage,
+    ImageRecord,
+    LesionType,
+    Manifest,
+    View,
+)
 
 
 def by_id(dataset_dir: Path) -> dict[str, ImageRecord]:
@@ -40,11 +47,20 @@ def test_manifest_reads_filename_csv_and_header_fields(dataset_dir: Path) -> Non
     assert first.patient_id == "a" * 16
     assert (first.laterality, first.view) == ("L", "CC")
     assert (first.rows, first.cols) == (6, 8)
-    assert first.dicom_path == f"AllDICOMs/11111111_{'a' * 16}_MG_L_CC_ANON.dcm"
+    assert first.image_path == f"AllDICOMs/11111111_{'a' * 16}_MG_L_CC_ANON.dcm"
     assert first.acquisition_date == "200902"
     assert first.birads == "4a"
     assert first.acr == 2
     assert by_id(dataset_dir)["22222221"].rows == 10
+
+
+def test_inbreast_has_its_pixel_size_and_no_official_split(dataset_dir: Path) -> None:
+    manifest = build_manifest(dataset_dir)
+    assert manifest.dataset == "inbreast" and manifest.dropped == ()
+    assert {image.pixel_size_mm for image in manifest.images} == {0.07}
+    assert {image.official_split for image in manifest.images} == {None}
+    lesions = [roi for image in manifest.images for roi in image.rois]
+    assert all(roi.mask_path is None and roi.pathology is None for roi in lesions)
 
 
 def test_view_is_mlo_for_filename_ml_and_csv_mlo(dataset_dir: Path) -> None:
@@ -154,7 +170,7 @@ def test_rois_frame_has_one_row_per_roi(dataset_dir: Path) -> None:
 
 
 def test_frames_of_an_empty_manifest_keep_their_columns() -> None:
-    empty = Manifest(version=1, images=())
+    empty = Manifest(version=2, dataset="inbreast", images=())
     assert list(images_frame(empty).columns) == IMAGE_COLUMNS
     assert list(rois_frame(empty).columns) == ROI_COLUMNS
 
@@ -300,22 +316,37 @@ def test_written_manifest_is_json_with_one_image_per_line(
     path = tmp_path / "manifest.json"
     write_manifest(build_manifest(dataset_dir), path)
     data = json.loads(path.read_text())
-    assert data["version"] == 1
+    assert (data["version"], data["dataset"], data["dropped"]) == (2, "inbreast", [])
     assert [image["file_id"] for image in data["images"]][0] == "11111111"
     assert data["images"][0]["rois"][0]["lesion_type"] == "mass"
     assert len(path.read_text().splitlines()) == 4 + 2
 
 
+def test_written_manifest_keeps_the_dropped_images(
+    dataset_dir: Path, tmp_path: Path
+) -> None:
+    dropped = (DroppedImage(file_id="99999999", reason="no mask for mass 1"),)
+    manifest = replace(build_manifest(dataset_dir), dropped=dropped)
+    path = tmp_path / "manifest.json"
+    write_manifest(manifest, path)
+    assert read_manifest(path) == manifest
+    assert json.loads(path.read_text())["dropped"] == [
+        {"file_id": "99999999", "reason": "no mask for mass 1"}
+    ]
+
+
 def test_read_manifest_rejects_a_file_with_a_missing_field(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
-    path.write_text('{"version": 1, "images": [{"file_id": "1"}]}')
+    text = '{"version": 2, "dataset": "inbreast", "images": [{"file_id": "1"}]}'
+    path.write_text(text)
     with pytest.raises(ValidationError, match="Field required"):
         read_manifest(path)
 
 
 def test_read_manifest_rejects_another_version(tmp_path: Path) -> None:
     path = tmp_path / "manifest.json"
-    path.write_text('{"version": 2, "images": []}')
+    # Version 1, from before the schema was common to the datasets.
+    path.write_text('{"version": 1, "images": []}')
     with pytest.raises(ValidationError, match="version"):
         read_manifest(path)
 

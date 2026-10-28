@@ -10,10 +10,8 @@ from mammo_seg.data.schema import LesionType, Roi, View
 from mammo_seg.data.strata import (
     DEFAULT_DENSE_ACR,
     DEFAULT_SMALL_MASS_MM2,
-    INBREAST_PIXEL_SIZE_MM,
     PatientProfile,
     Stratification,
-    area_mm2,
     group_name,
     merge_small_groups,
     patient_profiles,
@@ -24,25 +22,26 @@ from mammo_seg.data.strata import (
 
 def test_an_area_is_in_square_millimetres_at_the_native_pixel_size() -> None:
     roi = Roi(LesionType.MASS, ((0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)))
-    assert area_mm2(roi) == pytest.approx(10_000 * 0.07**2)  # 49 mm²
-    assert area_mm2(roi, pixel_size_mm=0.14) == pytest.approx(4 * 49)
+    image = make_image(1, 1)
+    assert image.area_mm2(roi) == pytest.approx(10_000 * 0.07**2)  # 49 mm²
+    coarse = replace(image, pixel_size_mm=0.14)
+    assert coarse.area_mm2(roi) == pytest.approx(4 * 49)
 
 
 def test_the_test_squares_have_the_area_asked_for() -> None:
-    assert area_mm2(Roi(LesionType.MASS, square_of(100.0))) == pytest.approx(100.0)
+    image = make_image(1, 1, masses=1, mass_mm2=100.0)
+    assert image.area_mm2(image.rois[0]) == pytest.approx(100.0)
 
 
 def test_the_defaults_are_those_of_the_dataset() -> None:
-    assert INBREAST_PIXEL_SIZE_MM == 0.07
     assert DEFAULT_SMALL_MASS_MM2 == 100.0
     assert DEFAULT_DENSE_ACR == 3
-    assert Stratification() == Stratification(0.07, 100.0, 3)
+    assert Stratification() == Stratification(100.0, 3)
 
 
 @pytest.mark.parametrize(
     "changes",
     [
-        {"pixel_size_mm": 0.0},
         {"small_mass_mm2": -1.0},
         {"dense_acr": 0},
         {"dense_acr": 5},
@@ -85,7 +84,7 @@ def test_a_mass_is_small_below_the_threshold(mm2: float, small: bool) -> None:
 
 def test_a_mass_exactly_at_the_threshold_is_not_small() -> None:
     image = make_image(1, 1, masses=1, mass_mm2=100.0)
-    threshold = area_mm2(image.rois[0])
+    threshold = image.area_mm2(image.rois[0])
     (profile,) = patient_profiles([image], Stratification(small_mass_mm2=threshold))
     assert not profile.small_mass
 
@@ -106,11 +105,19 @@ def test_the_threshold_is_in_square_millimetres_not_pixels() -> None:
     side = math.sqrt(2000)
     roi = Roi(LesionType.MASS, ((0.0, 0.0), (side, 0.0), (side, side), (0.0, side)))
     image = replace(make_image(1, 1), rois=(roi,))
-    (fine,) = patient_profiles([image], Stratification(small_mass_mm2=10.0))
-    (coarse,) = patient_profiles(
-        [image], Stratification(pixel_size_mm=0.157, small_mass_mm2=10.0)
-    )
+    coarse_image = replace(image, pixel_size_mm=0.157)
+    settings = Stratification(small_mass_mm2=10.0)
+    (fine,) = patient_profiles([image], settings)
+    (coarse,) = patient_profiles([coarse_image], settings)
     assert fine.small_mass and not coarse.small_mass
+
+
+def test_a_mass_of_unknown_size_in_mm2_is_an_error() -> None:
+    image = replace(make_image(1, 1, masses=1), pixel_size_mm=None)
+    with pytest.raises(ValueError, match="the pixel size is unknown"):
+        patient_profiles([image])
+    # Without a mass, the pixel size is not needed.
+    assert patient_profiles([replace(make_image(1, 1), pixel_size_mm=None)])
 
 
 def test_only_mass_rois_count() -> None:

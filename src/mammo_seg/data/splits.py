@@ -47,7 +47,9 @@ from mammo_seg.data.strata import (
 DEFAULT_MANIFEST = INBREAST_PROCESSED_DIR / "manifest.json"
 DEFAULT_OUTPUT = INBREAST_PROCESSED_DIR / "splits.json"
 DEFAULT_SEED = 0
-SPLITS_VERSION: Final = 2  # 2: stratified on strata, which are stored
+# 2: stratified on strata, which are stored; 3: the pixel size comes from the
+# manifest (version 2), so it is no longer a stratification setting.
+SPLITS_VERSION: Final = 3
 _CONFIG = ConfigDict(strict=True, extra="forbid")
 
 # The one FB image (a reversed CC) has no mass annotation although its breast has a
@@ -197,7 +199,7 @@ def split_summary(frame: pd.DataFrame) -> pd.DataFrame:
 class SplitsFile:
     """The content of ``splits.json``: the splits and how they were made."""
 
-    version: Literal[2]
+    version: Literal[3]
     manifest_fingerprint: str  # see manifest_fingerprint()
     seed: int
     n_folds: int

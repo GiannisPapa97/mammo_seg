@@ -16,46 +16,56 @@ By default it reads `data/raw/inbreast/INbreast Release 1.0` and writes `data/pr
 
 Code, all in `src/mammo_seg/data/`:
 
-- `schema.py`: the schema (`LesionType`, `Roi`, `ImageRecord`, `Manifest`) as frozen pydantic dataclasses, and the JSON conversion.
+- `schema.py`: the schema (`LesionType`, `Roi`, `ImageRecord`, `DroppedImage`, `Manifest`) as frozen pydantic dataclasses, and the JSON conversion. One schema serves every dataset (see below).
 - `annotations.py`: reads the XML annotation files and normalizes lesion names.
 - `manifest.py`: builds and validates the manifest, writes and reads the JSON file, and converts it to pandas tables.
 
 ### Format
 
-A JSON file with a schema version and one record per image. Each record holds the image metadata and every annotated lesion (ROI) with a type and a polygon. The file has one image per line so it stays readable and diffs well.
+A JSON file with a schema version, the name of the dataset, one record per image and the images left out of the dataset (`dropped`, with the reason; none for INbreast). Each record holds the image metadata and every annotated lesion (ROI) with a type and an outline. The file has one image per line so it stays readable and diffs well.
 
 ```json
-{"version": 1, "images": [
+{"version": 2, "dataset": "inbreast", "images": [
   {"file_id": "20586908", "patient_id": "6c613a14b80a8591", "laterality": "R",
-   "view": "CC", "dicom_path": "AllDICOMs/20586908_6c613a14b80a8591_MG_R_CC_ANON.dcm",
-   "rows": 4084, "cols": 3328, "acquisition_date": "200902", "acr": 2, "birads": "2",
-   "has_annotation": true,
+   "view": "CC", "image_path": "AllDICOMs/20586908_6c613a14b80a8591_MG_R_CC_ANON.dcm",
+   "rows": 4084, "cols": 3328, "pixel_size_mm": 0.07, "acquisition_date": "200902",
+   "acr": 2, "birads": "2", "official_split": null, "has_annotation": true,
    "rois": [{"lesion_type": "mass", "points": [[2290.4, 2835.3], [2292.8, 2835.7]]}]}
-]}
+], "dropped": []}
 ```
 
-Image fields:
+**One schema for every dataset** (version 2). Every field that a dataset can fill is filled from its raw files, and a field is `null` only where the dataset has no value; nothing is derived from another field (a lesion's assessment is not copied from the BI-RADS of its image, for example). The image fields are always written, `null` included. The lesion fields a dataset does not have (a mask for a polygon, the pathology for INbreast) are left out of the file, so the INbreast lesions are as compact as before. Version 1, the INbreast-only schema, is rejected: build the manifest again (and then the splits, whose fingerprint of the manifest changes; their folds stay the same).
 
-| Field | Source | Meaning |
+Image fields, and where INbreast takes them from:
+
+| Field | INbreast source | Meaning |
 |---|---|---|
-| `file_id` | DICOM filename | Image id: a string of digits |
-| `patient_id` | DICOM filename | Anonymized patient id (lowercase hex); the grouping key for splits |
+| `file_id` | DICOM filename | Image id; letters, digits, `_`, `-` and `.` (it names files). INbreast: a string of digits |
+| `patient_id` | DICOM filename | Anonymized patient id, letters, digits and `_`; the grouping key for splits. INbreast: lowercase hex |
 | `laterality` | DICOM filename | `L` or `R` |
 | `view` | DICOM filename | One of `CC`, `MLO` or `FB`; the filenames write `ML` for `MLO`. Any other value is an error |
-| `dicom_path` | DICOM filename | Path of the image relative to the dataset folder |
+| `image_path` | DICOM filename | Path of the image file (DICOM or JPEG) relative to the dataset folder |
 | `rows`, `cols` | DICOM header | Image size in pixels, greater than 0 |
-| `acquisition_date` | `INbreast.csv` | Year and semester as six digits, e.g. `200902` |
+| `pixel_size_mm` | the publication | Side of a native pixel in mm, greater than 0, or `null` if unknown. INbreast: 0.07 for every image; the headers have none, and the `Area` of the XML annotations (in cm²) confirms it for every mass polygon |
+| `acquisition_date` | `INbreast.csv` | Year and semester as six digits, e.g. `200902`, or `null` |
 | `acr` | `INbreast.csv` | Breast density 1 to 4; `null` for one image (any other value is an error) |
-| `birads` | `INbreast.csv` | BI-RADS category: one of `1`, `2`, `3`, `4a`, `4b`, `4c`, `5`, `6` |
-| `has_annotation` | XML files | An annotation file exists for the image (false for the normal images) |
+| `birads` | `INbreast.csv` | BI-RADS category of the image: one of `1`, `2`, `3`, `4a`, `4b`, `4c`, `5`, `6`, or `null` where a dataset has none per image |
+| `official_split` | none | The dataset's own `train` or `test` split, or `null`. INbreast has none: the splits are made by `splits.py` |
+| `has_annotation` | XML files | An annotation exists for the image (false for the normal images) |
 | `rois` | XML files | The lesions of the image; empty when there is no annotation |
 
-ROI fields:
+ROI fields (only `lesion_type` is required; INbreast fills `lesion_type` and `points`):
 
 | Field | Meaning |
 |---|---|
 | `lesion_type` | One of `mass`, `calcification`, `cluster`, `spiculated_region`, `distortion`, `asymmetry`, `unknown` |
 | `points` | Polygon outline in pixels, `[x, y]` = `[column, row]`, finite numbers (no NaN or infinity); a single point for most calcifications |
+| `mask_path`, `mask_area_px` | Instead of a polygon: a mask image of the size of the image, relative to the dataset folder, and its pixels. Always together, never with `points`. The masks step does not read these yet and stops with an error |
+| `abnormality_id` | The number of the lesion in its image, from 1 |
+| `pathology` | `MALIGNANT`, `BENIGN` or `BENIGN_WITHOUT_CALLBACK` |
+| `assessment` | BI-RADS assessment of the lesion, 0 to 5 |
+| `subtlety` | 0 to 5, 5 the most obvious |
+| `shape`, `margins` | Text, as the dataset records it |
 
 The lesion type is a closed set. Raw names are mapped to it, merging misspellings (`Assymetry`, `Espiculated Region`, ...). Regions with no usable name (`Point 1`, `Unnamed`, empty) become `unknown`. A name that is not in the mapping is an error, so new data cannot slip in silently.
 
@@ -64,7 +74,8 @@ The lesion type is a closed set. Raw names are mapped to it, merging misspelling
 `read_manifest(path)` returns a `Manifest`. Facts that follow from the ROIs are computed, not stored:
 
 - `ImageRecord.n_masses` and `ImageRecord.has_mass` (the positive label for mass segmentation)
-- `Roi.area_px`, the polygon area in pixels (not clipped to the image)
+- `Roi.area_px`, the area in pixels: of the mask, or of the polygon (not clipped to the image)
+- `ImageRecord.area_mm2(roi)`, the area in mm² at the image's `pixel_size_mm`; an error when the pixel size is unknown, so no step computes areas in mm² from a guess
 
 For splitting and analysis, `images_frame(manifest)` gives one row per image (including `n_masses` and `has_mass`) and `rois_frame(manifest)` one row per ROI (lesion type, number of points, area), as pandas tables.
 
@@ -121,7 +132,7 @@ Code, in `src/mammo_seg/data/`: `strata.py` (the stratum of every patient), `spl
    - for a patient with a mass: whether any of the masses, in any image, is smaller than 100 mm² (`small`, `large`);
    - whether any image of the patient has an ACR density of 3 or 4 (`dense`, `fatty`); the one image without a density counts as neither.
 
-   For example `mass/small/dense` or `no_mass/fatty`. Mass areas are in mm², from the polygons at the native pixel size of 0.07 mm (see `dataset.md`), not in preprocessed pixels, whose size varies with the breast box.
+   For example `mass/small/dense` or `no_mass/fatty`. Mass areas are in mm², from the outlines at the native pixel size of each image in the manifest (0.07 mm for INbreast, see `dataset.md`), not in preprocessed pixels, whose size varies with the breast box.
 3. A stratum needs at least one patient for every set. A stratum with too few patients is merged with its neighbours by dropping its last factor (for example `mass/small/dense` and `mass/small/fatty` become `mass/small`), until every stratum is large enough or only the first factor is left.
 4. With `--test-fraction`, that share of patients is held out first, stratified on the strata merged to at least K + 1 patients (one for the test set and one per fold). The rest is split into K folds with scikit-learn's `StratifiedKFold`, stratified on the strata merged again, to at least K patients. Every set then gets about the same mix of patients and about the same size.
 5. Each image gets the set of its patient: `fold_<i>`, `test` or `excluded`.
@@ -149,12 +160,12 @@ Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; 
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "manifest_fingerprint": "414d0377...",
   "seed": 0,
   "n_folds": 5,
   "test_fraction": 0.2,
-  "stratification": {"pixel_size_mm": 0.07, "small_mass_mm2": 100.0, "dense_acr": 3},
+  "stratification": {"small_mass_mm2": 100.0, "dense_acr": 3},
   "strata": {"036aff49b8ac84f0": "mass/small/dense", "...": "..."},
   "splits": {
     "test_patients": ["036aff49b8ac84f0", "..."],
@@ -168,6 +179,7 @@ Every set has 5 or 6 patients with a dense breast and 2 to 4 with a small mass; 
 - `stratification` holds the thresholds of the strata, and `strata` the stratum of every patient of the splits, before any merging.
 - The file is rejected if a patient is in two sets, a fold is empty, `n_folds` does not match the number of folds, a test set exists without a test fraction (or the reverse), or `strata` does not name exactly the patients of the splits.
 - Version 2 is the first with strata. A file of version 1 (stratified on masses only) is rejected, so make the splits again; its folds differ from the new ones.
+- Version 3 takes the pixel size from the manifest (version 2) instead of a stratification setting. A file of version 2 is rejected; making the splits again with the same arguments gives the same folds, with a new fingerprint of the manifest.
 - `read_splits(path)` reads it, `splits_frame(manifest, splits)` gives one row per image with its set, `split_summary(frame)` counts patients and images per set, and `strata_summary(splits_file)` counts the patients of every stratum per set.
 
 ### Decisions

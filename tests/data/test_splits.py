@@ -25,7 +25,7 @@ def test_select_images_drops_the_excluded_views() -> None:
         make_image(2, 1, view=View.FB),
         make_image(3, 2, view=View.MLO),
     )
-    selected = select_images(Manifest(version=1, images=images))
+    selected = select_images(Manifest(version=2, dataset="inbreast", images=images))
     assert [image.file_id for image in selected] == ["00000001", "00000003"]
 
 
@@ -90,7 +90,7 @@ def test_all_the_images_of_a_patient_follow_the_patient() -> None:
 def test_the_excluded_view_stays_out_but_its_patient_is_split() -> None:
     manifest = make_manifest(20, 30)
     fb = make_image(900, 0, view=View.FB, masses=1)
-    manifest = Manifest(version=1, images=(*manifest.images, fb))
+    manifest = Manifest(version=2, dataset="inbreast", images=(*manifest.images, fb))
     splits = make_splits(manifest, 5)
     frame = splits_frame(manifest, splits).set_index("file_id")
     assert splits.excluded_images == ("00000900",)
@@ -104,7 +104,9 @@ def test_a_mass_only_in_an_excluded_image_does_not_make_the_patient_positive() -
         make_image(2, 1),
         make_image(3, 2),
     ]
-    selected = select_images(Manifest(version=1, images=tuple(images)))
+    selected = select_images(
+        Manifest(version=2, dataset="inbreast", images=tuple(images))
+    )
     assert patient_groups(selected) == {
         pid(1): ("no_mass", "fatty"),
         pid(2): ("no_mass", "fatty"),
@@ -114,7 +116,9 @@ def test_a_mass_only_in_an_excluded_image_does_not_make_the_patient_positive() -
 def test_a_patient_with_only_excluded_images_is_not_split() -> None:
     manifest = make_manifest(10, 10)
     only_fb = make_image(900, 99, view=View.FB)
-    manifest = Manifest(version=1, images=(*manifest.images, only_fb))
+    manifest = Manifest(
+        version=2, dataset="inbreast", images=(*manifest.images, only_fb)
+    )
     splits = make_splits(manifest, 5)
     assert pid(99) not in splits.split_of_patient()
     assert splits_frame(manifest, splits).split.eq(EXCLUDED).sum() == 1
@@ -129,7 +133,9 @@ def test_splits_are_reproducible_and_depend_on_the_seed() -> None:
 
 def test_the_order_of_the_images_does_not_matter() -> None:
     manifest = make_manifest(20, 30)
-    reversed_manifest = Manifest(version=1, images=manifest.images[::-1])
+    reversed_manifest = Manifest(
+        version=2, dataset="inbreast", images=manifest.images[::-1]
+    )
     assert make_splits(manifest, 5, test_fraction=0.2) == make_splits(
         reversed_manifest, 5, test_fraction=0.2
     )
@@ -161,7 +167,9 @@ def test_too_few_patients_with_a_mass_are_rejected() -> None:
 
 
 def test_a_manifest_with_no_patient_images_is_rejected() -> None:
-    only_fb = Manifest(version=1, images=(make_image(1, 1, view=View.FB),))
+    only_fb = Manifest(
+        version=2, dataset="inbreast", images=(make_image(1, 1, view=View.FB),)
+    )
     with pytest.raises(ValueError, match="no patients"):
         make_splits(only_fb, 2)
 
@@ -176,7 +184,7 @@ def test_splits_frame_rejects_a_manifest_the_splits_do_not_match() -> None:
 def test_split_summary_counts_patients_and_images_per_set() -> None:
     manifest = make_manifest(20, 30)
     fb = make_image(900, 0, view=View.FB)
-    manifest = Manifest(version=1, images=(*manifest.images, fb))
+    manifest = Manifest(version=2, dataset="inbreast", images=(*manifest.images, fb))
     summary = split_summary(splits_frame(manifest, make_splits(manifest, 5, 0.2)))
     assert list(summary.index) == [
         EXCLUDED,
@@ -233,7 +241,7 @@ def stratified_manifest(counts: dict[tuple[str, ...], int]) -> Manifest:
                 make_image(2 * patient + 1, patient, view=View.MLO, **options),  # type: ignore[arg-type]
             ]
             patient += 1
-    return Manifest(version=1, images=tuple(images))
+    return Manifest(version=2, dataset="inbreast", images=tuple(images))
 
 
 def strata_per_set(manifest: Manifest, splits: Splits) -> dict[str, dict[str, int]]:

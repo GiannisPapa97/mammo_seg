@@ -2,8 +2,8 @@
 
 import math
 
+from mammo_seg.data.manifest import INBREAST_PIXEL_SIZE_MM
 from mammo_seg.data.schema import ImageRecord, LesionType, Manifest, Point, Roi, View
-from mammo_seg.data.strata import INBREAST_PIXEL_SIZE_MM
 
 SQUARE = ((0.0, 0.0), (4.0, 0.0), (4.0, 3.0), (0.0, 3.0))
 
@@ -31,12 +31,14 @@ def make_image(
         patient_id=f"{patient:016x}",
         laterality="L",
         view=view,
-        dicom_path=f"AllDICOMs/{file_id}.dcm",
+        image_path=f"AllDICOMs/{file_id}.dcm",
         rows=10,
         cols=10,
+        pixel_size_mm=INBREAST_PIXEL_SIZE_MM,
         acquisition_date="200902",
         acr=acr,
         birads="2",
+        official_split=None,
         has_annotation=bool(rois),
         rois=rois,
     )
@@ -55,7 +57,7 @@ def make_manifest(with_mass: int, without_mass: int, per_patient: int = 4) -> Ma
                     masses=1 if patient < with_mass and position == 0 else 0,
                 )
             )
-    return Manifest(version=1, images=tuple(images))
+    return Manifest(version=2, dataset="inbreast", images=tuple(images))
 
 
 def pid(patient: int) -> str:

@@ -83,13 +83,13 @@ def dataset(tmp_path: Path) -> Dataset:
             replace(
                 make_image(number, number),
                 laterality=laterality,
-                dicom_path=f"AllDICOMs/{name}",
+                image_path=f"AllDICOMs/{name}",
                 rows=400,
                 cols=300,
                 rois=rois,
             )
         )
-    manifest = Manifest(version=1, images=tuple(images))
+    manifest = Manifest(version=2, dataset="inbreast", images=tuple(images))
     write_masks(manifest, tmp_path / "masks")
     return Dataset(manifest, tmp_path, tmp_path / "masks", tmp_path / "preprocessed")
 
@@ -142,7 +142,7 @@ def test_the_stored_images_are_what_the_on_the_fly_chain_gives(
 ) -> None:
     run(dataset)
     for image in dataset.manifest.images:
-        pixels = read_pixels(dataset.dicoms / image.dicom_path)
+        pixels = read_pixels(dataset.dicoms / image.image_path)
         expected, params = preprocess(pixels, image.laterality, SETTINGS)
         stored = read_image(image_path(dataset.output, image.file_id))
         assert np.array_equal(stored, expected)
@@ -243,12 +243,16 @@ def test_a_record_with_an_unknown_version_or_field_is_rejected(
         read_record(path)
 
 
-def test_the_record_rejects_a_file_id_that_is_not_a_number(dataset: Dataset) -> None:
+@pytest.mark.parametrize("file_id", ["a/b", "-1", ""])
+def test_the_record_rejects_a_key_that_is_not_a_file_id(
+    dataset: Dataset, file_id: str
+) -> None:
+    # File ids name files, so a path separator or a leading dash is refused.
     run(dataset)
     record = read_record(dataset.output / RECORD_FILE)
     with pytest.raises(ValidationError):
         PreprocessingRecord(
-            version=1, settings=SETTINGS, images={"abc": record.images[ID1]}
+            version=1, settings=SETTINGS, images={file_id: record.images[ID1]}
         )
 
 
@@ -289,7 +293,9 @@ def test_a_mass_outside_the_breast_box_is_a_problem(dataset: Dataset) -> None:
     pixels[10:30, 10:30] = 3000  # a bright patch far from the breast
     write_dicom_pixels(dataset.dicoms / "AllDICOMs" / f"{ID1}.dcm", pixels)
     image = replace(dataset.manifest.images[0], rois=(mass(10, 10, 30, 30),))
-    manifest = Manifest(version=1, images=(image, *dataset.manifest.images[1:]))
+    manifest = Manifest(
+        version=2, dataset="inbreast", images=(image, *dataset.manifest.images[1:])
+    )
     write_masks(manifest, dataset.masks)
     with pytest.raises(
         PreprocessingError, match=f"image {ID1}: the crop box cuts the mask"
@@ -301,7 +307,9 @@ def test_a_mass_outside_the_breast_box_is_a_problem(dataset: Dataset) -> None:
 
 def test_a_mask_that_vanishes_when_rescaled_is_a_problem(dataset: Dataset) -> None:
     image = replace(dataset.manifest.images[0], rois=(mass(150, 200, 151, 201),))
-    manifest = Manifest(version=1, images=(image, *dataset.manifest.images[1:]))
+    manifest = Manifest(
+        version=2, dataset="inbreast", images=(image, *dataset.manifest.images[1:])
+    )
     write_masks(manifest, dataset.masks)
     tiny = PreprocessingSettings(margin=0.05, downscale=1, opening=0, size=10)
     with pytest.raises(PreprocessingError, match="vanishes when rescaled"):

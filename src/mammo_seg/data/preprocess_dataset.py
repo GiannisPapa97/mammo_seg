@@ -171,7 +171,7 @@ def preprocess_dataset(
     short_sides: list[int] = []
     for image in manifest.images:
         try:
-            pixels = read_pixels(dataset_dir / image.dicom_path)
+            pixels = read_pixels(dataset_dir / image.image_path)
             if pixels.shape != (image.rows, image.cols):
                 raise ValueError(
                     f"the DICOM is {pixels.shape} but the manifest says "

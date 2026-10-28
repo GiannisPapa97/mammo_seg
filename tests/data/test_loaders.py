@@ -38,7 +38,7 @@ def manifest() -> Manifest:
     images = [
         make_image(number, number, masses=int(number == 1)) for number in (1, 2, 3)
     ]
-    return Manifest(version=1, images=tuple(images))
+    return Manifest(version=2, dataset="inbreast", images=tuple(images))
 
 
 def drawn_ids(loader: torch.utils.data.DataLoader) -> list[str]:  # type: ignore[type-arg]
@@ -170,7 +170,7 @@ def test_a_small_mass_is_one_under_100_mm2_on_its_polygon() -> None:
         make_image(3, 3),
         make_image(4, 4, masses=2, mass_mm2=50.0),
     ]
-    manifest = Manifest(version=1, images=tuple(images))
+    manifest = Manifest(version=2, dataset="inbreast", images=tuple(images))
     ids = ["00000004", "00000003", "00000002", "00000001"]
     assert has_small_mass_of(manifest, ids) == [True, False, False, True]
     assert has_small_mass_of(manifest, ids, small_mass_mm2=200.0) == [
@@ -191,7 +191,7 @@ def small_and_large() -> Manifest:
         make_image(2, 2, masses=1, mass_mm2=500.0),
         make_image(3, 3),
     ]
-    return Manifest(version=1, images=tuple(images))
+    return Manifest(version=2, dataset="inbreast", images=tuple(images))
 
 
 def test_the_training_loader_draws_the_small_masses_more_often(
@@ -342,7 +342,9 @@ def test_the_evaluation_loader_uses_every_image_once_in_order(
 def test_the_training_loader_needs_the_images_in_the_manifest(
     dataset: MammogramDataset, manifest: Manifest
 ) -> None:
-    other = Manifest(version=1, images=(replace(manifest.images[0]),))
+    other = Manifest(
+        version=2, dataset="inbreast", images=(replace(manifest.images[0]),)
+    )
     with pytest.raises(ValueError, match="not in the manifest"):
         training_loader(dataset, other, batch_size=2)
 

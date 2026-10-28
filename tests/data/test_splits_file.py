@@ -33,7 +33,7 @@ def valid_splits() -> Splits:
 
 def valid_file(**changes: object) -> SplitsFile:
     fields: dict[str, object] = {
-        "version": 2,
+        "version": 3,
         "manifest_fingerprint": "0" * 64,
         "seed": 0,
         "n_folds": 2,
@@ -61,7 +61,9 @@ def test_the_fingerprint_is_stable_and_follows_the_content() -> None:
     assert len(manifest_fingerprint(manifest)) == 64
     first = manifest.images[0]
     changed = replace(first, rois=(*first.rois, Roi(LesionType.MASS, SQUARE)))
-    other = Manifest(version=1, images=(changed, *manifest.images[1:]))
+    other = Manifest(
+        version=2, dataset="inbreast", images=(changed, *manifest.images[1:])
+    )
     assert manifest_fingerprint(other) != manifest_fingerprint(manifest)
 
 
@@ -108,11 +110,8 @@ def test_a_splits_file_round_trips_through_json(tmp_path: Path) -> None:
         "strata",
         "splits",
     ]
-    assert list(data["stratification"]) == [
-        "pixel_size_mm",
-        "small_mass_mm2",
-        "dense_acr",
-    ]
+    # The pixel size comes from the manifest, so it is not a setting of the splits.
+    assert list(data["stratification"]) == ["small_mass_mm2", "dense_acr"]
     assert list(data["splits"]) == ["test_patients", "folds", "excluded_images"]
 
 
@@ -142,6 +141,7 @@ def test_a_file_without_a_test_set_has_no_test_fraction() -> None:
     ("changes", "message"),
     [
         ({"version": 1}, "version"),  # made before the stratification by strata
+        ({"version": 2}, "version"),  # made with the pixel size as a setting
         ({"n_folds": 3}, "n_folds is 3 but there are 2 folds"),
         ({"test_fraction": 1.5}, "between 0 and 1"),
         ({"test_fraction": None}, "exactly when a test fraction"),
@@ -185,6 +185,16 @@ def test_inconsistent_splits_are_rejected(
     }
     with pytest.raises(ValidationError, match=message):
         Splits(**{**fields, **splits})  # type: ignore[arg-type]
+
+
+def test_a_file_with_the_pixel_size_as_a_setting_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "splits.json"
+    write_splits(create_splits_file(make_manifest(20, 30), 5), path)
+    data = json.loads(path.read_text())
+    data["stratification"]["pixel_size_mm"] = 0.07
+    path.write_text(json.dumps({**data, "version": 2}))
+    with pytest.raises(ValidationError, match="version"):
+        read_splits(path)
 
 
 def test_a_file_of_the_first_version_is_refused(tmp_path: Path) -> None:
