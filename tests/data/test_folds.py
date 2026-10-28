@@ -16,7 +16,7 @@ def manifest() -> Manifest:
     """20 patients with a mass and 30 without, 4 images each, plus one FB image."""
     base = make_manifest(20, 30)
     fb = make_image(900, 0, view=View.FB)
-    return Manifest(version=1, images=(*base.images, fb))
+    return Manifest(version=2, dataset="inbreast", images=(*base.images, fb))
 
 
 def test_train_and_validation_cover_all_folds_without_overlap(

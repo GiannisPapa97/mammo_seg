@@ -191,11 +191,19 @@ class MaskSummary:
 def write_masks(manifest: Manifest, output_dir: Path) -> MaskSummary:
     """Write the mass mask of every image; raises MaskError listing all problems.
 
-    A mask with a problem is not written.
+    A mask with a problem is not written. Lesions given as mask images (CBIS-DDSM)
+    are a problem too: this step draws polygons only, and skipping them would
+    leave their masses out of the masks.
     """
     problems: list[str] = []
     images_with_masks = masses = clipped = pixels = 0
     for image in manifest.images:
+        if any(roi.mask_path is not None for roi in image.rois):
+            problems.append(
+                f"image {image.file_id}: its lesions are mask images, which this "
+                "step does not read"
+            )
+            continue
         shape = (image.rows, image.cols)
         mask = rasterize(image.rois, shape)
         found = mask_problems(mask, image.rois, shape)

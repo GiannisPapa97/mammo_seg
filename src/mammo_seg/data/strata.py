@@ -19,9 +19,8 @@ first:
 3. whether any image of the patient has an ACR density of ``dense_acr`` or more
    (``dense``, ``fatty``); a missing density counts as neither
 
-Areas are in mm², from the polygons at the native pixel size, never in
-preprocessed pixels, whose size varies from image to image. The INbreast DICOM
-headers have no pixel spacing; the publication gives 0.07 mm.
+Areas are in mm², from the outlines at the native pixel size of each image (in
+the manifest), never in preprocessed pixels, whose size varies from image to image.
 
 A group needs enough patients to put one in every set. ``merge_small_groups``
 merges a group that is too small with its neighbours by dropping its last factor:
@@ -37,9 +36,8 @@ from typing import Annotated, Final
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
-from mammo_seg.data.schema import ImageRecord, LesionType, Roi
+from mammo_seg.data.schema import ImageRecord, LesionType
 
-INBREAST_PIXEL_SIZE_MM: Final = 0.07  # from the INbreast publication
 DEFAULT_SMALL_MASS_MM2: Final = 100.0
 DEFAULT_DENSE_ACR: Final = 3
 SEPARATOR: Final = "/"  # between the factors of a group name
@@ -51,14 +49,8 @@ Group = tuple[str, ...]  # the factors of a group, most important first
 class Stratification:
     """How patients are grouped; stored with the splits."""
 
-    pixel_size_mm: Annotated[float, Field(gt=0)] = INBREAST_PIXEL_SIZE_MM
     small_mass_mm2: Annotated[float, Field(gt=0)] = DEFAULT_SMALL_MASS_MM2
     dense_acr: Annotated[int, Field(ge=1, le=4)] = DEFAULT_DENSE_ACR
-
-
-def area_mm2(roi: Roi, pixel_size_mm: float = INBREAST_PIXEL_SIZE_MM) -> float:
-    """The area of an ROI's polygon in mm², at the native pixel size."""
-    return roi.area_px * pixel_size_mm**2
 
 
 @std_dataclass(frozen=True)
@@ -90,7 +82,8 @@ def patient_profiles(
     """One profile per patient of ``images``, sorted by patient id.
 
     Only mass ROIs count; the same mass seen in two views counts in both, so a
-    mass that is small in one view makes the patient's group ``small``.
+    mass that is small in one view makes the patient's group ``small``. Raises
+    ValueError for a mass in an image of unknown pixel size.
     """
     dense: dict[str, bool] = {}
     smallest: dict[str, float | None] = {}
@@ -102,7 +95,7 @@ def patient_profiles(
         smallest.setdefault(patient, None)
         for roi in image.rois:
             if roi.lesion_type is LesionType.MASS:
-                area = area_mm2(roi, stratification.pixel_size_mm)
+                area = image.area_mm2(roi)
                 known = smallest[patient]
                 smallest[patient] = area if known is None else min(known, area)
     profiles = []

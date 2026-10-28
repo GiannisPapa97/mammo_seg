@@ -1,5 +1,6 @@
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +95,7 @@ def test_a_pixel_area_follows_the_resize_of_the_breast_box() -> None:
         shape=(1024, 512),
         flipped=False,
     )
-    assert pixel_area_mm2(params) == pytest.approx((3 * 0.07) ** 2)  # 3 x 3 pixels
+    assert pixel_area_mm2(params, 0.07) == pytest.approx((3 * 0.07) ** 2)  # 3 x 3
     assert pixel_area_mm2(params, native_pixel_mm=0.1) == pytest.approx(0.09)
 
 
@@ -447,6 +448,21 @@ def manifest(tmp_path: Path) -> Manifest:
     manifest = make_manifest(4, 4, per_patient=2)
     write_preprocessed_for(tmp_path / "preprocessed", SETTINGS, manifest)
     return manifest
+
+
+def test_the_infos_need_the_pixel_size_of_every_image(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    record = read_record(tmp_path / "preprocessed" / RECORD_FILE)
+    first, *rest = manifest.images
+    unknown = Manifest(
+        version=2,
+        dataset="inbreast",
+        images=(replace(first, pixel_size_mm=None), *rest),
+    )
+    with pytest.raises(ValueError, match="the pixel size is unknown"):
+        image_infos(record, unknown, [first.file_id])
+    assert image_infos(record, unknown, [rest[0].file_id])  # the others are fine
 
 
 def test_a_model_is_scored_under_every_setting_and_against_predicting_nothing(

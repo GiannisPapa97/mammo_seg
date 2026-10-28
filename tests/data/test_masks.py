@@ -284,7 +284,8 @@ def image_with(
 
 def make_small_manifest() -> Manifest:
     return Manifest(
-        version=1,
+        version=2,
+        dataset="inbreast",
         images=(
             image_with(
                 1,
@@ -327,7 +328,8 @@ def test_write_masks_reports_every_problem_and_skips_those_masks(
 ) -> None:
     bow_tie = mass((0, 0), (20, 20), (20, 0), (0, 20))
     manifest = Manifest(
-        version=1,
+        version=2,
+        dataset="inbreast",
         images=(
             image_with(1, (rectangle(5, 5, 15, 12),)),
             image_with(2, (bow_tie,)),
@@ -341,6 +343,21 @@ def test_write_masks_reports_every_problem_and_skips_those_masks(
     assert error.value.problems[1] == (
         "image 00000003: mass 0: outside the image or smaller than a pixel"
     )
+    assert [path.name for path in tmp_path.iterdir()] == ["00000001.png"]
+
+
+def test_lesions_given_as_mask_images_are_refused_not_skipped(tmp_path: Path) -> None:
+    mask = Roi(LesionType.MASS, mask_path="jpeg/1.2/1-2.jpg", mask_area_px=40)
+    manifest = Manifest(
+        version=2,
+        dataset="cbis-ddsm",
+        images=(image_with(1, (rectangle(5, 5, 15, 12),)), image_with(2, (mask,))),
+    )
+    with pytest.raises(MaskError) as error:
+        write_masks(manifest, tmp_path)
+    assert error.value.problems == [
+        "image 00000002: its lesions are mask images, which this step does not read"
+    ]
     assert [path.name for path in tmp_path.iterdir()] == ["00000001.png"]
 
 
@@ -367,7 +384,8 @@ def test_main_reports_problems(
     bow_tie = mass((0, 0), (20, 20), (20, 0), (0, 20))
     manifest_path = tmp_path / "manifest.json"
     write_manifest(
-        Manifest(version=1, images=(image_with(1, (bow_tie,)),)), manifest_path
+        Manifest(version=2, dataset="inbreast", images=(image_with(1, (bow_tie,)),)),
+        manifest_path,
     )
     code = main(
         ["--manifest", str(manifest_path), "--output-dir", str(tmp_path / "out")]

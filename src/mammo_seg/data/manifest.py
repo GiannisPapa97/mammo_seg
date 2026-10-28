@@ -6,6 +6,10 @@ over several places: the DICOM filename (patient id, laterality, view),
 the ``.xml`` annotations (every lesion with its type and polygon). Later steps
 read the manifest instead of the raw files. The schema is in ``schema.py``.
 
+The headers have no pixel spacing; the publication gives 0.07 mm, which the
+``Area`` of the annotations (in cm²) confirms for every mass polygon. INbreast has
+no official split, no lesion pathology and leaves no image out.
+
 Run it with ``python -m mammo_seg.data.manifest``.
 """
 
@@ -16,7 +20,7 @@ import sys
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, Final, Literal, NamedTuple
 
 import pandas as pd
 import pydicom
@@ -30,24 +34,28 @@ from mammo_seg.data.schema import (
     Manifest,
     Roi,
     View,
+    dropped_to_json,
     image_to_json,
     manifest_from_json,
 )
 
 DEFAULT_DATASET_DIR = INBREAST_RAW_DIR
 DEFAULT_OUTPUT = INBREAST_PROCESSED_DIR / "manifest.json"
+INBREAST_PIXEL_SIZE_MM: Final = 0.07  # from the INbreast publication
 
 IMAGE_COLUMNS = [
     "file_id",
     "patient_id",
     "laterality",
     "view",
-    "dicom_path",
+    "image_path",
     "rows",
     "cols",
+    "pixel_size_mm",
     "acquisition_date",
     "acr",
     "birads",
+    "official_split",
     "has_annotation",
     "n_masses",
     "has_mass",
@@ -216,12 +224,14 @@ def build_manifest(dataset_dir: Path) -> Manifest:
             "patient_id": dicom.patient_id,
             "laterality": dicom.laterality,
             "view": dicom.view,
-            "dicom_path": dicom.dicom_path,
+            "image_path": dicom.dicom_path,
             "rows": rows,
             "cols": cols,
+            "pixel_size_mm": INBREAST_PIXEL_SIZE_MM,
             "acquisition_date": row.acquisition_date,
             "acr": row.acr,
             "birads": row.birads,
+            "official_split": None,
             "has_annotation": file_id in annotations,
             "rois": annotations.get(file_id, ()),
         }
@@ -231,14 +241,23 @@ def build_manifest(dataset_dir: Path) -> Manifest:
             problems.append(f"image {file_id}: {_describe(error)}")
     if problems:
         raise ManifestError(problems)
-    return Manifest(version=SCHEMA_VERSION, images=tuple(images))
+    return Manifest(version=SCHEMA_VERSION, dataset="inbreast", images=tuple(images))
+
+
+def _json_list(lines: list[str]) -> str:
+    """A JSON list with one item per line, or ``[]``."""
+    return "[\n" + ",\n".join("  " + line for line in lines) + "\n]" if lines else "[]"
 
 
 def write_manifest(manifest: Manifest, path: Path) -> None:
     """Write the manifest as JSON, one image per line so it stays readable."""
-    lines = ",\n".join("  " + image_to_json(image) for image in manifest.images)
+    images = _json_list([image_to_json(image) for image in manifest.images])
+    dropped = _json_list([dropped_to_json(item) for item in manifest.dropped])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f'{{"version": {manifest.version}, "images": [\n{lines}\n]}}\n')
+    path.write_text(
+        f'{{"version": {manifest.version}, "dataset": "{manifest.dataset}", '
+        f'"images": {images}, "dropped": {dropped}}}\n'
+    )
 
 
 def read_manifest(path: Path) -> Manifest:

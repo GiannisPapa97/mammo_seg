@@ -40,7 +40,7 @@ from torch.utils.data import DataLoader, Sampler, WeightedRandomSampler
 from mammo_seg.data.augmentation import PatchKind
 from mammo_seg.data.dataset import DEFAULT_MULTIPLE, MammogramDataset, Sample
 from mammo_seg.data.schema import LesionType, Manifest
-from mammo_seg.data.strata import DEFAULT_SMALL_MASS_MM2, area_mm2
+from mammo_seg.data.strata import DEFAULT_SMALL_MASS_MM2
 
 DEFAULT_POSITIVE_FRACTION = 0.5
 
@@ -60,14 +60,16 @@ def has_small_mass_of(
     small_mass_mm2: float = DEFAULT_SMALL_MASS_MM2,
 ) -> list[bool]:
     """Whether each image has a mass smaller than ``small_mass_mm2``, by the area of
-    its polygon at the native pixel size, in the order of ``file_ids``."""
+    its outline at the native pixel size, in the order of ``file_ids``. Raises
+    ValueError for a mass in an image of unknown pixel size."""
     by_id = {image.file_id: image for image in manifest.images}
     missing = sorted(set(file_ids) - by_id.keys())
     if missing:
         raise ValueError(f"images not in the manifest: {missing}")
     return [
         any(
-            roi.lesion_type is LesionType.MASS and area_mm2(roi) < small_mass_mm2
+            roi.lesion_type is LesionType.MASS
+            and by_id[file_id].area_mm2(roi) < small_mass_mm2
             for roi in by_id[file_id].rois
         )
         for file_id in file_ids

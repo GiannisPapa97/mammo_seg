@@ -72,11 +72,7 @@ from mammo_seg.data.preprocess_dataset import (
 from mammo_seg.data.preprocessing import PreprocessingSettings, PreprocessParams
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile, fold_name
-from mammo_seg.data.strata import (
-    DEFAULT_DENSE_ACR,
-    DEFAULT_SMALL_MASS_MM2,
-    INBREAST_PIXEL_SIZE_MM,
-)
+from mammo_seg.data.strata import DEFAULT_DENSE_ACR, DEFAULT_SMALL_MASS_MM2
 from mammo_seg.device import resolve_device
 from mammo_seg.engine.checkpoint import load_checkpoint, model_from_checkpoint
 from mammo_seg.engine.inference import Inference, predict
@@ -125,7 +121,7 @@ class ImageInfo:
     """What the scoring needs to know about an image besides its tensors."""
 
     pixel_area_mm2: float  # the area of one preprocessed pixel
-    birads: str  # the BI-RADS category of the image, for example "4a"
+    birads: str | None  # the BI-RADS category of the image, e.g. "4a"; None if none
     acr: int | None  # the ACR breast density, 1 to 4; None if unknown
     # Which image it is, for the details of an evaluation; empty when unknown.
     file_id: str = ""
@@ -133,10 +129,9 @@ class ImageInfo:
     view: str = ""
 
 
-def pixel_area_mm2(
-    params: PreprocessParams, native_pixel_mm: float = INBREAST_PIXEL_SIZE_MM
-) -> float:
-    """The area in mm² of one pixel of an image preprocessed with ``params``."""
+def pixel_area_mm2(params: PreprocessParams, native_pixel_mm: float) -> float:
+    """The area in mm² of one pixel of an image preprocessed with ``params``, from
+    the side of its native pixel in mm."""
     rows, cols = params.shape
     return (params.box.height / rows) * (params.box.width / cols) * native_pixel_mm**2
 
@@ -145,19 +140,25 @@ def image_infos(
     record: PreprocessingRecord, manifest: Manifest, file_ids: Sequence[str]
 ) -> dict[str, ImageInfo]:
     """The ``ImageInfo`` of every image of ``file_ids``, from the preprocessing and
-    the manifest."""
+    the manifest. Raises ValueError for an image of unknown pixel size."""
     images = {image.file_id: image for image in manifest.images}
-    return {
-        file_id: ImageInfo(
-            pixel_area_mm2(record.images[file_id]),
-            images[file_id].birads,
-            images[file_id].acr,
+    infos = {}
+    for file_id in file_ids:
+        image = images[file_id]
+        if image.pixel_size_mm is None:
+            raise ValueError(
+                f"image {file_id}: the pixel size is unknown, so areas in mm² "
+                "cannot be computed"
+            )
+        infos[file_id] = ImageInfo(
+            pixel_area_mm2(record.images[file_id], image.pixel_size_mm),
+            image.birads,
+            image.acr,
             file_id,
-            images[file_id].patient_id,
-            images[file_id].view.value,
+            image.patient_id,
+            image.view.value,
         )
-        for file_id in file_ids
-    }
+    return infos
 
 
 def remove_small_regions(prediction: torch.Tensor, min_area: int) -> torch.Tensor:
