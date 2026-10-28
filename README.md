@@ -20,7 +20,7 @@ uv sync --extra cu130    # a GPU machine with a recent NVIDIA driver (CUDA 13.0)
 
 A plain `uv sync` installs no PyTorch and removes it if it was installed.
 
-**Kaggle (tried), Google Colab (notebooks written, not yet run) and other cloud notebooks (not tried).** They come with a GPU build of PyTorch already installed, which must not be replaced. Install the package with the `cloud` extra, which adds the model library and leaves PyTorch alone:
+**Kaggle and Google Colab (tried) and other cloud notebooks (not tried).** They come with a GPU build of PyTorch already installed, which must not be replaced. Install the package with the `cloud` extra, which adds the model library and leaves PyTorch alone:
 
 ```bash
 pip install ".[cloud]"

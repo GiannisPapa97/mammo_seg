@@ -74,7 +74,7 @@ smp adapts the pretrained first layer to a grayscale image by summing its weight
 
 ### Free cloud GPUs (Kaggle, Colab)
 
-The model code runs the same on a CPU and on a GPU, so tests and smoke runs happen locally and real training on a cloud notebook (Kaggle was tried; the Colab notebooks are written but not yet run):
+The model code runs the same on a CPU and on a GPU, so tests and smoke runs happen locally and real training on a cloud notebook (Kaggle and Colab were tried):
 
 1. **Install without touching PyTorch.** The notebook comes with a GPU build of PyTorch. Install the package with `pip install ".[cloud]"` (see the README); a simulated install into an environment that already had PyTorch left it untouched.
 2. **The device** is chosen by `resolve_device()`: `auto` picks the GPU. Asking for `cuda` on a notebook without a GPU is an error, not a silent run on the CPU.
@@ -171,7 +171,7 @@ mammo_seg/
   mammo_seg_runs/<RUN_NAME>/                                       # code_version.txt, fold_<k>/
 ```
 
-The runs are written straight to Drive (`mammo_seg_runs/<RUN_NAME>`), so a session that ends loses at most the epoch in progress, and running the cells again resumes. To continue a run started on Kaggle, copy the `runs` folder of its output there first. The splits are made with a fixed seed, so an archive of the same manifest has the same folds as Kaggle; the setup prints the hashes of `splits.json` and `preprocessing.json` to check that. Keep the Drive folder private: the archive is the dataset, whose license is unclear.
+The runs are written straight to Drive (`mammo_seg_runs/<RUN_NAME>`), so a session that ends loses at most the epoch in progress, and running the cells again resumes. To continue a run started on Kaggle, copy the `runs` folder of its output there first; this was done for the ResNet18 run (see `results/2026-10-28_whole_1024_resnet18`), whose fold 4 ended on Kaggle after epoch 31 and continued on Colab from epoch 32. The install prints `ERROR: pip's dependency resolver` with conflicts of packages that come with Colab (pandas, numpy and pillow are newer than some of them want); training and evaluation do not use those packages and ran normally. The splits are made with a fixed seed, so an archive of the same manifest has the same folds as Kaggle; the setup prints the hashes of `splits.json` and `preprocessing.json` to check that. Keep the Drive folder private: the archive is the dataset, whose license is unclear.
 
 **Whole images or patches.** [notebooks/08_kaggle_whole_vs_patches.ipynb](../notebooks/08_kaggle_whole_vs_patches.ipynb) trains all five folds of both consistent designs (whole images predicted in one pass; patches predicted in sliding windows), with 60 epochs of 64 steps each, evaluates the last epoch of every fold, and compares the designs by the mean and the standard deviation over the folds and by the difference per fold. It resumes in a later session like the training notebook.
 
