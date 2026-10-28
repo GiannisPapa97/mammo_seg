@@ -41,13 +41,18 @@ uv run pytest
 
 Datasets are not part of this repository. The `data/` directory is git-ignored and has one folder per dataset: raw data goes in `data/raw/<dataset>/` and derived data in `data/processed/<dataset>/`, for example `data/raw/inbreast/` and `data/processed/inbreast/`.
 
-To download and unzip the INbreast dataset (about 2 GB, about 9 GB unzipped) from its [Kaggle copy](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) into `data/raw/inbreast/`:
+To download and unzip a dataset into its folder in `data/raw/`:
 
 ```bash
-scripts/download_data.sh
+scripts/download_data.sh             # INbreast, the default
+scripts/download_data.sh cbis-ddsm   # CBIS-DDSM
+scripts/download_data.sh all         # both
 ```
 
-It needs `curl` and `unzip`, resumes an interrupted download, and does nothing if the data is already there. The license of this copy is unclear, so do not redistribute the data. See [docs/dataset.md](docs/dataset.md) for what it contains.
+- `inbreast`: the [Kaggle copy of INbreast](https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset) (about 2 GB, about 9 GB unzipped) into `data/raw/inbreast/`. See [docs/dataset.md](docs/dataset.md) for what it contains.
+- `cbis-ddsm`: the [Kaggle copy of CBIS-DDSM](https://www.kaggle.com/datasets/awsaf49/cbis-ddsm-breast-cancer-image-dataset) as JPEG images with CSV descriptions (about 5.3 GB, about 6.3 GB unzipped) into `data/raw/cbis-ddsm/`. The pipeline below does not read it yet.
+
+The script needs `curl` and `unzip`, checks the size of each zip and the number of images after unzipping, resumes an interrupted download (up to five tries in a row, then by running it again), and does nothing for a dataset that is already there. The zip is kept; delete it to free the space. The license of the INbreast copy is unclear, so do not redistribute the data.
 
 Then build the validated manifest (`data/processed/inbreast/manifest.json`: every image with its metadata and lesions):
 
