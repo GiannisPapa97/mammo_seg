@@ -1,6 +1,6 @@
 # Data pipeline
 
-How the raw INbreast release is turned into training data. The facts about the raw data are in [dataset.md](dataset.md); this document describes the code. It grows as the pipeline steps are added.
+How the raw INbreast release is turned into training data. The facts about the raw data are in [dataset.md](dataset.md) (INbreast) and [dataset-cbis-ddsm.md](dataset-cbis-ddsm.md) (CBIS-DDSM); this document describes the code. It grows as the pipeline steps are added. For CBIS-DDSM only the manifest is built so far; the later steps read INbreast.
 
 Raw data lives in `data/raw/<dataset>/` and is read-only. Everything derived goes to `data/processed/<dataset>/`. Both are git-ignored. For INbreast these are `data/raw/inbreast/` and `data/processed/inbreast/`, the defaults of every step (`src/mammo_seg/data/paths.py`).
 
@@ -9,20 +9,22 @@ Raw data lives in `data/raw/<dataset>/` and is read-only. Everything derived goe
 **Goal:** one validated description of every image and its lesions, so later steps read the manifest instead of parsing the raw files again.
 
 ```bash
-uv run python -m mammo_seg.data.manifest
+uv run python -m mammo_seg.data.manifest                        # INbreast, the default
+uv run python -m mammo_seg.data.manifest --dataset cbis-ddsm    # CBIS-DDSM
 ```
 
-By default it reads `data/raw/inbreast/INbreast Release 1.0` and writes `data/processed/inbreast/manifest.json`. Use `--dataset-dir` and `--output` to change them.
+By default it reads `data/raw/inbreast/INbreast Release 1.0` and writes `data/processed/inbreast/manifest.json`; for CBIS-DDSM it reads `data/raw/cbis-ddsm` and writes `data/processed/cbis-ddsm/manifest.json`. Use `--dataset-dir` and `--output` to change them.
 
 Code, all in `src/mammo_seg/data/`:
 
-- `schema.py`: the schema (`LesionType`, `Roi`, `ImageRecord`, `DroppedImage`, `Manifest`) as frozen pydantic dataclasses, and the JSON conversion. One schema serves every dataset (see below).
+- `schema.py`: the schema (`LesionType`, `Roi`, `ImageRecord`, `DroppedImage`, `Manifest`) as frozen pydantic dataclasses, the JSON conversion, and `ManifestError`, which every builder raises. One schema serves every dataset (see below).
 - `annotations.py`: reads the XML annotation files and normalizes lesion names.
-- `manifest.py`: builds and validates the manifest, writes and reads the JSON file, and converts it to pandas tables.
+- `manifest.py`: builds and validates the manifest of INbreast, writes and reads the JSON file, converts it to pandas tables, and runs the builder of the chosen dataset (`--dataset`).
+- `cbis_ddsm.py`: builds and validates the manifest of CBIS-DDSM: its masses, from the mass CSVs and the JPEG folders.
 
 ### Format
 
-A JSON file with a schema version, the name of the dataset, one record per image and the images left out of the dataset (`dropped`, with the reason; none for INbreast). Each record holds the image metadata and every annotated lesion (ROI) with a type and an outline. The file has one image per line so it stays readable and diffs well.
+A JSON file with a schema version, the name of the dataset, one record per image and the images left out of the dataset (`dropped`, with the reason; none for INbreast, 78 for CBIS-DDSM). Each record holds the image metadata and every annotated lesion (ROI) with a type and an outline. The file has one image per line so it stays readable and diffs well.
 
 ```json
 {"version": 2, "dataset": "inbreast", "images": [
@@ -36,25 +38,25 @@ A JSON file with a schema version, the name of the dataset, one record per image
 
 **One schema for every dataset** (version 2). Every field that a dataset can fill is filled from its raw files, and a field is `null` only where the dataset has no value; nothing is derived from another field (a lesion's assessment is not copied from the BI-RADS of its image, for example). The image fields are always written, `null` included. The lesion fields a dataset does not have (a mask for a polygon, the pathology for INbreast) are left out of the file, so the INbreast lesions are as compact as before. Version 1, the INbreast-only schema, is rejected: build the manifest again (and then the splits, whose fingerprint of the manifest changes; their folds stay the same).
 
-Image fields, and where INbreast takes them from:
+Image fields, and where each dataset takes them from (CBIS-DDSM: the mass CSVs and the JPEG files; its image folder is the first part of the `image file path` in the CSV, such as `Mass-Training_P_00001_LEFT_CC`):
 
-| Field | INbreast source | Meaning |
-|---|---|---|
-| `file_id` | DICOM filename | Image id; letters, digits, `_`, `-` and `.` (it names files). INbreast: a string of digits |
-| `patient_id` | DICOM filename | Anonymized patient id, letters, digits and `_`; the grouping key for splits. INbreast: lowercase hex |
-| `laterality` | DICOM filename | `L` or `R` |
-| `view` | DICOM filename | One of `CC`, `MLO` or `FB`; the filenames write `ML` for `MLO`. Any other value is an error |
-| `image_path` | DICOM filename | Path of the image file (DICOM or JPEG) relative to the dataset folder |
-| `rows`, `cols` | DICOM header | Image size in pixels, greater than 0 |
-| `pixel_size_mm` | the publication | Side of a native pixel in mm, greater than 0, or `null` if unknown. INbreast: 0.07 for every image; the headers have none, and the `Area` of the XML annotations (in cm²) confirms it for every mass polygon |
-| `acquisition_date` | `INbreast.csv` | Year and semester as six digits, e.g. `200902`, or `null` |
-| `acr` | `INbreast.csv` | Breast density 1 to 4; `null` for one image (any other value is an error) |
-| `birads` | `INbreast.csv` | BI-RADS category of the image: one of `1`, `2`, `3`, `4a`, `4b`, `4c`, `5`, `6`, or `null` where a dataset has none per image |
-| `official_split` | none | The dataset's own `train` or `test` split, or `null`. INbreast has none: the splits are made by `splits.py` |
-| `has_annotation` | XML files | An annotation exists for the image (false for the normal images) |
-| `rois` | XML files | The lesions of the image; empty when there is no annotation |
+| Field | INbreast source | CBIS-DDSM source | Meaning |
+|---|---|---|---|
+| `file_id` | DICOM filename | image folder | Image id; letters, digits, `_`, `-` and `.` (it names files). INbreast: a string of digits |
+| `patient_id` | DICOM filename | image folder (`P_00001`) | Anonymized patient id, letters, digits and `_`; the grouping key for splits. INbreast: lowercase hex |
+| `laterality` | DICOM filename | image folder (`LEFT`, `RIGHT`) | `L` or `R` |
+| `view` | DICOM filename | image folder | One of `CC`, `MLO` or `FB`; the INbreast filenames write `ML` for `MLO`. Any other value is an error |
+| `image_path` | DICOM filename | the JPEG of the image's series | Path of the image file (DICOM or JPEG) relative to the dataset folder |
+| `rows`, `cols` | DICOM header | JPEG header | Image size in pixels, greater than 0 |
+| `pixel_size_mm` | the publication | none | Side of a native pixel in mm, greater than 0, or `null` if unknown. INbreast: 0.07 for every image; the headers have none, and the `Area` of the XML annotations (in cm²) confirms it for every mass polygon |
+| `acquisition_date` | `INbreast.csv` | none | Year and semester as six digits, e.g. `200902`, or `null`. The dates of the CBIS-DDSM `dicom_info.csv` are those of the conversion, not of the mammogram |
+| `acr` | `INbreast.csv` | `breast_density` | Breast density 1 to 4; `null` for one INbreast image (any other value is an error) |
+| `birads` | `INbreast.csv` | none | BI-RADS category of the image: one of `1`, `2`, `3`, `4a`, `4b`, `4c`, `5`, `6`, or `null` where a dataset has none per image (CBIS-DDSM has an assessment per lesion) |
+| `official_split` | none | the CSV of the image | The dataset's own `train` or `test` split, or `null`. INbreast has none: the splits are made by `splits.py` |
+| `has_annotation` | XML files | always | An annotation exists for the image (false for the normal images) |
+| `rois` | XML files | the rows of the image | The lesions of the image; empty when there is no annotation |
 
-ROI fields (only `lesion_type` is required; INbreast fills `lesion_type` and `points`):
+ROI fields (only `lesion_type` is required; INbreast fills `lesion_type` and `points`, CBIS-DDSM every field but `points`, from the CSV row of the mass):
 
 | Field | Meaning |
 |---|---|
@@ -65,7 +67,7 @@ ROI fields (only `lesion_type` is required; INbreast fills `lesion_type` and `po
 | `pathology` | `MALIGNANT`, `BENIGN` or `BENIGN_WITHOUT_CALLBACK` |
 | `assessment` | BI-RADS assessment of the lesion, 0 to 5 |
 | `subtlety` | 0 to 5, 5 the most obvious |
-| `shape`, `margins` | Text, as the dataset records it |
+| `shape`, `margins` | Text, as the dataset records it; `null` where CBIS-DDSM writes `N/A` |
 
 The lesion type is a closed set. Raw names are mapped to it, merging misspellings (`Assymetry`, `Espiculated Region`, ...). Regions with no usable name (`Point 1`, `Unnamed`, empty) become `unknown`. A name that is not in the mapping is an error, so new data cannot slip in silently.
 
@@ -81,7 +83,7 @@ For splitting and analysis, `images_frame(manifest)` gives one row per image (in
 
 ### Validation
 
-`build_manifest` raises `ManifestError` listing every problem it finds, and nothing is written. It checks that:
+Each builder raises `ManifestError` listing every problem it finds, and nothing is written. For INbreast, `build_manifest` checks that:
 
 - DICOM filenames follow the expected pattern, the view is one of `CC`, `MLO` or `FB`, and file ids are unique
 - every DICOM image has a row in `INbreast.csv` and every row has an image
@@ -91,18 +93,31 @@ For splitting and analysis, `images_frame(manifest)` gives one row per image (in
 - every image record satisfies the schema constraints above (BI-RADS, ACR, date, sizes and so on); violations are reported per image, together with the other problems
 - every annotation file describes one image, its lesion names are known and its points can be read
 
+For CBIS-DDSM, `build_cbis_ddsm_manifest` checks that:
+
+- both mass CSVs have the expected columns, and on every row the abnormality type is `mass`, the numbers are integers and the pathology is known
+- the image folder names the split, patient, breast and view of its row, and the mask folder is that of the row's mass (`<image folder>_<abnormality id>`)
+- every path has the form `<folder>/<study>/<series>/<file>`, with a series made of digits and dots (so a path cannot leave `jpeg/`)
+- the rows of one image agree on the image series and the density, and name each mass and each mask series once
+- the series of every image has one JPEG, a grey image, and the series of every mass exists
+- at most one file of a mass's series has the size of the image (the mask; the other is the crop), and that mask is a grey image, nearly binary (at most 0.1% of its pixels between 64 and 191) and not empty; a pixel above 127 is mass
+- every record satisfies the schema constraints (assessment and subtlety 0 to 5, density 1 to 4, and so on)
+
+An image with a mass that has no file of the image's size is not an error: it is left out (`dropped`, with the masses concerned), because a mass left unannotated would teach the model that it is background.
+
 The schema classes are validated by [pydantic](https://docs.pydantic.dev) in strict mode, so a wrong type, an out-of-range value (for example a non-positive image size or an ACR outside 1 to 4), a missing or extra field, an unknown lesion type or view, or another schema version is rejected both when an object is built and when a file is read. `read_manifest` raises `pydantic.ValidationError` (a `ValueError`) that names the offending value.
 
 ### On the real data
 
-The manifest of the Kaggle copy has 410 images, 108 patients, 7316 ROIs and 107 images with a mass (303 without), matching `dataset.md`. The file is about 2 MB.
+The manifest of the Kaggle copy has 410 images, 108 patients, 7316 ROIs and 107 images with a mass (303 without), matching `dataset.md`. The file is about 2 MB. The CBIS-DDSM manifest has 1514 images (1166 train, 348 test) of 853 patients, all with a mass, 1618 masses, and 78 images left out, matching [dataset-cbis-ddsm.md](dataset-cbis-ddsm.md). It takes about 2 minutes, as every mask is read, and is about 1 MB.
 
 ### Decisions
 
 - Only `mass` counts as positive; every other lesion type is kept in the manifest but not used for mass segmentation.
 - The one `FB` image (a reversed CC; see the Views section of `dataset.md`) is kept in the manifest but excluded from training and evaluation.
-- The manifest keeps all ROIs, including calcifications, so a later calcification task needs no new parsing.
-- The manifest is not committed. It is derived from a dataset with an unclear license and is regenerated by the command above.
+- The INbreast manifest keeps all ROIs, including calcifications, so a later calcification task needs no new parsing.
+- The CBIS-DDSM manifest has the masses only: the calcification CSVs are not read, so calcifications on its images are not annotated, and the images with calcifications only are not in it. They could be added later as images without a mass.
+- The manifests are not committed. They are derived from datasets whose data must not be redistributed and are regenerated by the commands above.
 
 ## 2. Patient splits
 

@@ -10,7 +10,6 @@ from tests.data.synthetic import write_annotation, write_dicom
 from mammo_seg.data.manifest import (
     IMAGE_COLUMNS,
     ROI_COLUMNS,
-    ManifestError,
     build_manifest,
     images_frame,
     main,
@@ -23,6 +22,7 @@ from mammo_seg.data.schema import (
     ImageRecord,
     LesionType,
     Manifest,
+    ManifestError,
     View,
 )
 

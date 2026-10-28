@@ -41,12 +41,33 @@ from pydantic import (
     FiniteFloat,
     StringConstraints,
     TypeAdapter,
+    ValidationError,
     model_serializer,
     model_validator,
 )
 from pydantic.dataclasses import dataclass
 
 SCHEMA_VERSION: Final = 2
+
+
+class ManifestError(ValueError):
+    """The raw files of a dataset are inconsistent. ``problems`` lists every issue.
+
+    Raised by the manifest builder of every dataset.
+    """
+
+    def __init__(self, problems: list[str]) -> None:
+        self.problems = problems
+        super().__init__("invalid dataset:\n- " + "\n- ".join(problems))
+
+
+def describe(error: ValidationError) -> str:
+    """The invalid fields of a validation error as one line."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+        for item in error.errors()
+    )
+
 
 Point = tuple[FiniteFloat, FiniteFloat]
 
