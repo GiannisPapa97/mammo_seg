@@ -3,7 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from pydantic import ValidationError
+from PIL import Image
+from pydantic import TypeAdapter, ValidationError
 from tests.data.synthetic import write_dicom_pixels
 
 from mammo_seg.data.masks import rasterize
@@ -15,11 +16,14 @@ from mammo_seg.data.preprocessing import (
     PreprocessingSettings,
     PreprocessParams,
     breast_bbox,
+    breast_region,
+    chest_wall_on_right,
     normalize_intensity,
     preprocess,
     preprocess_mask,
     preprocess_points,
     read_pixels,
+    region_bbox,
     restore_mask,
     target_shape,
 )
@@ -204,6 +208,61 @@ def test_the_default_margin_keeps_a_breast_that_fills_the_image() -> None:
 # --- errors ---
 
 
+def test_a_border_leaves_out_bright_strips_along_the_edges() -> None:
+    # A strip along the top edge touches the breast; leaving out the outer
+    # 3 pixels separates them.
+    pixels = image(breast=(2, 60, 10, 50), strip=(0, 3, 0, 80))
+    assert exact_bbox(pixels) == BoundingBox(top=0, bottom=60, left=0, right=80)
+    assert exact_bbox(pixels, border=3) == BoundingBox(
+        top=3, bottom=60, left=10, right=50
+    )
+
+
+def test_the_region_is_the_breast_on_every_downscaled_pixel() -> None:
+    region = breast_region(image(breast=(20, 60, 10, 50)), downscale=2, opening=0)
+    assert region.shape == (50, 40)
+    assert region.sum() == 20 * 20
+    box = region_bbox(region, (100, 80), downscale=2, margin=0.0)
+    assert box == BoundingBox(top=20, bottom=60, left=10, right=50)
+    with pytest.raises(ValueError, match="margin cannot be negative"):
+        region_bbox(region, (100, 80), margin=-0.1)
+
+
+def wall_image(wall: str) -> np.ndarray:
+    """A breast filling the height on one side, brightest there, fading to the
+    nipple on the other."""
+    pixels = np.zeros((60, 80), dtype=np.uint16)
+    pixels[5:55, 5:45] = np.linspace(3000, 300, 40, dtype=np.uint16)
+    return pixels if wall == "left" else np.ascontiguousarray(pixels[:, ::-1])
+
+
+@pytest.mark.parametrize("wall", ["left", "right"])
+def test_the_chest_wall_is_where_the_breast_is_brightest(wall: str) -> None:
+    pixels = wall_image(wall)
+    region = breast_region(pixels, downscale=1, opening=0)
+    assert chest_wall_on_right(pixels, region, downscale=1) is (wall == "right")
+
+
+def test_dark_background_on_one_side_does_not_decide_the_side() -> None:
+    # Bright labels outside the breast region do not count.
+    pixels = wall_image("left")
+    pixels[50:58, 70:78] = 4000
+    region = breast_region(pixels, downscale=1, opening=0)
+    assert not chest_wall_on_right(pixels, region, downscale=1)
+
+
+@pytest.mark.parametrize(("wall", "laterality"), [("left", "R"), ("right", "L")])
+def test_by_image_the_flip_follows_the_chest_wall_not_the_laterality(
+    wall: str, laterality: str
+) -> None:
+    settings = PreprocessingSettings(
+        downscale=1, opening=0, margin=0.0, size=40, orientation="image"
+    )
+    result, params = preprocess(wall_image(wall), laterality, settings)  # type: ignore[arg-type]
+    assert params.flipped is (wall == "right")
+    assert result[:, :5].mean() > result[:, -5:].mean()  # the wall is on the left
+
+
 def test_an_image_without_a_breast_is_rejected() -> None:
     with pytest.raises(ValueError, match="no breast found"):
         exact_bbox(np.zeros((50, 50), dtype=np.uint16))
@@ -230,6 +289,7 @@ def test_an_image_that_is_not_two_dimensional_is_rejected() -> None:
         ({"margin": -0.1}, "margin cannot be negative"),
         ({"downscale": 0}, "downscale must be at least 1"),
         ({"opening": -1}, "opening at least 0"),
+        ({"border": -1}, "border at least 0"),
     ],
 )
 def test_invalid_arguments_are_rejected(
@@ -355,6 +415,16 @@ def test_the_default_settings_are_the_documented_ones() -> None:
     assert settings.size == DEFAULT_SIZE == 1024
     assert settings.max_intensity == DEFAULT_MAX_INTENSITY == 4095
     assert settings.percentile is None
+    assert (settings.border, settings.orientation) == (0, "laterality")
+
+
+def test_settings_written_before_border_and_orientation_still_read() -> None:
+    old = (
+        '{"threshold": 100, "margin": 0.02, "downscale": 8, "opening": 1, '
+        '"size": 1024, "max_intensity": 4095, "percentile": null}'
+    )
+    read = TypeAdapter(PreprocessingSettings).validate_json(old)
+    assert read == PreprocessingSettings()
 
 
 @pytest.mark.parametrize(
@@ -368,6 +438,8 @@ def test_the_default_settings_are_the_documented_ones() -> None:
         {"max_intensity": 0},
         {"percentile": 0},
         {"percentile": 100.5},
+        {"border": -1},
+        {"orientation": "nipple"},
     ],
 )
 def test_invalid_settings_are_rejected(changes: dict[str, float]) -> None:
@@ -545,6 +617,22 @@ def test_a_dicom_is_read_as_a_uint16_array(tmp_path: Path) -> None:
     read = read_pixels(tmp_path / "a.dcm")
     assert read.dtype == np.uint16
     assert np.array_equal(read, pixels)
+
+
+@pytest.mark.parametrize("name", ["a.jpg", "a.JPEG", "a.png"])
+def test_an_8_bit_grey_image_file_is_read_as_uint16(tmp_path: Path, name: str) -> None:
+    pixels = np.zeros((8, 16), dtype=np.uint8)
+    pixels[:, 8:] = 255
+    Image.fromarray(pixels).save(tmp_path / name, quality=100)
+    read = read_pixels(tmp_path / name)
+    assert read.dtype == np.uint16
+    assert np.array_equal(read, pixels)  # the values stay 0 to 255
+
+
+def test_an_image_file_that_is_not_8_bit_grey_is_rejected(tmp_path: Path) -> None:
+    Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(tmp_path / "a.png")
+    with pytest.raises(ValueError, match="expected an 8-bit grey image, got mode RGB"):
+        read_pixels(tmp_path / "a.png")
 
 
 def test_an_8_bit_dicom_is_widened(tmp_path: Path) -> None:

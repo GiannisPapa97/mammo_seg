@@ -2,18 +2,24 @@
 
 This is the cache of the first steps of the preprocessing chain (crop, rescale,
 flip, see ``preprocessing.py``). Training reads these files instead of decoding
-the DICOMs on every epoch; inference runs the same ``preprocess`` function on the
-incoming image, so both see identical input. The intensity normalization is not
-applied here: the images keep their 16-bit values and are normalized when loaded.
+the raw images on every epoch; inference runs the same ``preprocess`` function on
+the incoming image, so both see identical input. The intensity normalization is
+not applied here: the images keep their values and are normalized when loaded.
 
-Output, in ``data/processed/inbreast/preprocessed/`` by default:
+Each dataset has its settings (``DATASET_SETTINGS``). CBIS-DDSM is scanned film
+in 8-bit JPEGs: its values stay 0 to 255 (``max_intensity`` 255), its background
+is darker (a lower threshold) with bright film edges and labels (a border left out
+and a stronger opening), and its chest wall is not always on the side the
+laterality says, so the side is found from the image.
 
-- ``images/<file_id>.png``: the preprocessed image, 16-bit
+Output, in ``data/processed/<dataset>/preprocessed/`` by default:
+
+- ``images/<file_id>.png``: the preprocessed image, 16-bit (0 to 255 for CBIS-DDSM)
 - ``masks/<file_id>.png``: its mass mask, 8-bit with the values 0 and 255
 - ``preprocessing.json``: the settings and, for every image, what was done to it
   (crop box, size, flip), which maps a prediction back onto the original image
 
-Run it with ``python -m mammo_seg.data.preprocess_dataset``.
+Run it with ``python -m mammo_seg.data.preprocess_dataset [--dataset cbis-ddsm]``.
 """
 
 import argparse
@@ -21,6 +27,7 @@ import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass as std_dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Final, Literal
 
@@ -33,7 +40,12 @@ from scipy import ndimage
 
 from mammo_seg.data.manifest import read_manifest
 from mammo_seg.data.masks import mask_path, read_mask, write_mask
-from mammo_seg.data.paths import INBREAST_PROCESSED_DIR, INBREAST_RAW_DIR
+from mammo_seg.data.paths import (
+    INBREAST_PROCESSED_DIR,
+    INBREAST_RAW_DIR,
+    PROCESSED_DIRS,
+    RAW_DIRS,
+)
 from mammo_seg.data.preprocessing import (
     DEFAULT_SIZE,
     Mask,
@@ -44,7 +56,7 @@ from mammo_seg.data.preprocessing import (
     preprocess_mask,
     read_pixels,
 )
-from mammo_seg.data.schema import FileId, Manifest
+from mammo_seg.data.schema import Dataset, FileId, Manifest
 
 DEFAULT_MANIFEST = INBREAST_PROCESSED_DIR / "manifest.json"
 DEFAULT_DATASET_DIR = INBREAST_RAW_DIR
@@ -52,6 +64,21 @@ DEFAULT_MASKS_DIR = INBREAST_PROCESSED_DIR / "masks"
 DEFAULT_OUTPUT_DIR = INBREAST_PROCESSED_DIR / "preprocessed"
 RECORD_FILE = "preprocessing.json"
 RECORD_VERSION: Final = 1
+# The settings of each dataset. On CBIS-DDSM a threshold of 40 cuts masses off the
+# crop; with 20, the margin of 2% still cut 3 of them by a few pixels (masks drawn
+# past the dim skin line, and a mass at the image edge, behind the border left
+# out), which a margin of 3% already keeps.
+DATASET_SETTINGS: Final[dict[Dataset, PreprocessingSettings]] = {
+    "inbreast": PreprocessingSettings(),
+    "cbis-ddsm": PreprocessingSettings(
+        threshold=20,
+        margin=0.04,
+        opening=3,
+        border=2,
+        max_intensity=255,
+        orientation="image",
+    ),
+}
 
 # A mask averaged down to the new size keeps its area, up to the pixels on its edge:
 # up to 5% of the expected area plus half a pixel along the edge. On the INbreast
@@ -174,7 +201,7 @@ def preprocess_dataset(
             pixels = read_pixels(dataset_dir / image.image_path)
             if pixels.shape != (image.rows, image.cols):
                 raise ValueError(
-                    f"the DICOM is {pixels.shape} but the manifest says "
+                    f"the image is {pixels.shape} but the manifest says "
                     f"{(image.rows, image.cols)}"
                 )
             result, params = preprocess(pixels, image.laterality, settings)
@@ -206,10 +233,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Crop, rescale and flip every image of the manifest and store it."
     )
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR)
-    parser.add_argument("--masks-dir", type=Path, default=DEFAULT_MASKS_DIR)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--dataset",
+        choices=list(DATASET_SETTINGS),
+        default="inbreast",
+        help="its folders are the defaults of the paths, and its settings are used",
+    )
+    parser.add_argument(
+        "--manifest", type=Path, help="default: data/processed/<dataset>/manifest.json"
+    )
+    parser.add_argument(
+        "--dataset-dir", type=Path, help="the raw dataset (default: that of --dataset)"
+    )
+    parser.add_argument(
+        "--masks-dir", type=Path, help="default: data/processed/<dataset>/masks"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="default: data/processed/<dataset>/preprocessed",
+    )
     parser.add_argument(
         "--size",
         type=int,
@@ -217,22 +260,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="length of the longer side of the results, in pixels",
     )
     args = parser.parse_args(argv)
+    dataset: Dataset = args.dataset
+    processed = PROCESSED_DIRS[dataset]
+    output_dir = args.output_dir or processed / "preprocessed"
 
     started = time.time()
     try:
-        settings = PreprocessingSettings(size=args.size)
+        settings = replace(DATASET_SETTINGS[dataset], size=args.size)
         summary = preprocess_dataset(
-            read_manifest(args.manifest),
-            args.dataset_dir,
-            args.masks_dir,
-            args.output_dir,
+            read_manifest(args.manifest or processed / "manifest.json"),
+            args.dataset_dir or RAW_DIRS[dataset],
+            args.masks_dir or processed / "masks",
+            output_dir,
             settings,
         )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(
-        f"Wrote {summary.images} images and masks to {args.output_dir} in "
+        f"Wrote {summary.images} images and masks to {output_dir} in "
         f"{time.time() - started:.0f}s: longer side {settings.size}, shorter side "
         f"{summary.shortest_side[0]} to {summary.shortest_side[1]}, "
         f"{summary.images_with_masks} with a mass"

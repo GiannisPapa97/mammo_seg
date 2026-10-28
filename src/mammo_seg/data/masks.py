@@ -1,8 +1,11 @@
-"""Binary segmentation masks from the lesion polygons of the manifest.
+"""Binary segmentation masks from the lesions of the manifest.
 
-The raw data has no mask images, only polygons. A mask has the size of its image
-and holds 1 where a lesion of the chosen type (masses, by default) covers the
-pixel and 0 elsewhere. Several lesions of one image are merged into one mask.
+A mask has the size of its image and holds 1 where a lesion of the chosen type
+(masses, by default) covers the pixel and 0 elsewhere. Several lesions of one
+image are merged into one mask. INbreast has no mask images, only polygons, which
+are drawn; CBIS-DDSM has a mask image per lesion, which is read from the dataset
+folder (``cbis_ddsm.read_lesion_mask``) and checked against the area of the
+manifest.
 
 Polygons are in continuous image coordinates, ``(x, y)`` = ``(column, row)``, with
 the origin at the top-left corner, so the centre of pixel ``(row, column)`` is at
@@ -10,10 +13,11 @@ the origin at the top-left corner, so the centre of pixel ``(row, column)`` is a
 polygon (even-odd rule). Polygons that leave the image are clipped to it.
 
 Masks are stored at the native image size as PNG files with the values 0 and 255,
-one per image, in ``data/processed/inbreast/masks/<file_id>.png``. Writing them for the
-whole manifest also checks every mask against its polygons and fails loudly.
+one per image, in ``data/processed/<dataset>/masks/<file_id>.png``. Writing them
+for the whole manifest also checks every mask against its lesions and fails
+loudly.
 
-Run it with ``python -m mammo_seg.data.masks``.
+Run it with ``python -m mammo_seg.data.masks [--dataset cbis-ddsm]``.
 """
 
 import argparse
@@ -27,9 +31,10 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+from mammo_seg.data.cbis_ddsm import read_lesion_mask
 from mammo_seg.data.manifest import read_manifest
-from mammo_seg.data.paths import INBREAST_PROCESSED_DIR
-from mammo_seg.data.schema import LesionType, Manifest, Roi
+from mammo_seg.data.paths import INBREAST_PROCESSED_DIR, PROCESSED_DIRS, RAW_DIRS
+from mammo_seg.data.schema import Dataset, ImageRecord, LesionType, Manifest, Roi
 
 DEFAULT_MANIFEST = INBREAST_PROCESSED_DIR / "manifest.json"
 DEFAULT_OUTPUT_DIR = INBREAST_PROCESSED_DIR / "masks"
@@ -188,33 +193,70 @@ class MaskSummary:
     mask_pixels: int
 
 
-def write_masks(manifest: Manifest, output_dir: Path) -> MaskSummary:
+def _lesion_masks(
+    image: ImageRecord, dataset_dir: Path | None
+) -> tuple[Mask, list[str]]:
+    """The merged mask images of the masses of an image, and what is wrong."""
+    shape = (image.rows, image.cols)
+    mask = np.zeros(shape, dtype=np.uint8)
+    rois = [r for r in image.rois if r.mask_path is not None]
+    if not rois:
+        return mask, []
+    if dataset_dir is None:
+        return mask, ["its lesions are mask images, and no dataset folder is given"]
+    problems = []
+    for roi in rois:
+        if roi.lesion_type is not LesionType.MASS:
+            continue
+        label = f"mass {roi.abnormality_id}"
+        try:
+            lesion = read_lesion_mask(dataset_dir / str(roi.mask_path))
+        except (OSError, ValueError) as error:
+            problems.append(f"{label}: {error}")
+            continue
+        if lesion.shape != shape:
+            problems.append(
+                f"{label}: mask shape {lesion.shape} is not the image shape {shape}"
+            )
+        elif int(lesion.sum()) != roi.mask_area_px:
+            problems.append(
+                f"{label}: the mask has {int(lesion.sum())} pixels, the manifest "
+                f"says {roi.mask_area_px}"
+            )
+        else:
+            mask |= lesion
+    return mask, problems
+
+
+def write_masks(
+    manifest: Manifest, output_dir: Path, dataset_dir: Path | None = None
+) -> MaskSummary:
     """Write the mass mask of every image; raises MaskError listing all problems.
 
-    A mask with a problem is not written. Lesions given as mask images (CBIS-DDSM)
-    are a problem too: this step draws polygons only, and skipping them would
-    leave their masses out of the masks.
+    Polygons are drawn and mask images (CBIS-DDSM) are read from ``dataset_dir``,
+    which they need. A mask with a problem is not written.
     """
     problems: list[str] = []
     images_with_masks = masses = clipped = pixels = 0
     for image in manifest.images:
-        if any(roi.mask_path is not None for roi in image.rois):
-            problems.append(
-                f"image {image.file_id}: its lesions are mask images, which this "
-                "step does not read"
-            )
-            continue
         shape = (image.rows, image.cols)
-        mask = rasterize(image.rois, shape)
-        found = mask_problems(mask, image.rois, shape)
+        polygons = [roi for roi in image.rois if roi.mask_path is None]
+        mask = rasterize(polygons, shape)
+        found = mask_problems(mask, polygons, shape)
+        lesions, lesion_problems = _lesion_masks(image, dataset_dir)
+        found += lesion_problems
         if found:
             problems.extend(f"image {image.file_id}: {problem}" for problem in found)
             continue
+        mask |= lesions
         write_mask(mask, mask_path(output_dir, image.file_id))
-        mass_rois = [roi for roi in image.rois if roi.lesion_type is LesionType.MASS]
-        images_with_masks += bool(mass_rois)
-        masses += len(mass_rois)
-        clipped += sum(_leaves_image(roi, shape) for roi in mass_rois)
+        images_with_masks += image.has_mass
+        masses += image.n_masses
+        clipped += sum(
+            _leaves_image(roi, shape)
+            for roi in polygons
+            if roi.lesion_type is LesionType.MASS
+        )
         pixels += int(mask.sum())
     if problems:
         raise MaskError(problems)
@@ -239,17 +281,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Write the mass masks of every image of the manifest."
     )
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--dataset", choices=list(RAW_DIRS), default="inbreast")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="default: data/processed/<dataset>/manifest.json",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        help="the raw dataset, for mask images (default: that of --dataset)",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, help="default: data/processed/<dataset>/masks"
+    )
     args = parser.parse_args(argv)
+    dataset: Dataset = args.dataset
+    output_dir = args.output_dir or PROCESSED_DIRS[dataset] / "masks"
 
     try:
-        summary = write_masks(read_manifest(args.manifest), args.output_dir)
+        summary = write_masks(
+            read_manifest(args.manifest or PROCESSED_DIRS[dataset] / "manifest.json"),
+            output_dir,
+            args.dataset_dir or RAW_DIRS[dataset],
+        )
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(
-        f"Wrote {summary.images} masks to {args.output_dir}: "
+        f"Wrote {summary.images} masks to {output_dir}: "
         f"{summary.images_with_masks} with masses ({summary.masses} masses, "
         f"{summary.clipped_masses} clipped to the image), "
         f"{summary.images - summary.images_with_masks} empty"

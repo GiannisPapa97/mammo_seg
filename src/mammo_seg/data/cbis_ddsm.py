@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Final, Literal, NamedTuple, get_args
 
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 from pydantic import ValidationError
 
@@ -208,8 +209,8 @@ def _read_header(path: Path) -> tuple[str, int, int]:
         return image.mode, image.height, image.width
 
 
-def mask_area(path: Path) -> int:
-    """The pixels of the mass in a mask JPEG: those above ``MASK_THRESHOLD``.
+def read_lesion_mask(path: Path) -> npt.NDArray[np.uint8]:
+    """A mask JPEG as a 0/1 array: 1 where the pixel is above ``MASK_THRESHOLD``.
 
     Raises ValueError when the mask is not a nearly binary grey image or is empty.
     """
@@ -220,10 +221,15 @@ def mask_area(path: Path) -> int:
     grey = np.count_nonzero((pixels >= 64) & (pixels <= 191)) / pixels.size
     if grey > MAX_GREY_SHARE:
         raise ValueError(f"{grey:.2%} of the pixels are mid-grey, not a binary mask")
-    area = int(np.count_nonzero(pixels > MASK_THRESHOLD))
-    if area == 0:
+    mask = (pixels > MASK_THRESHOLD).astype(np.uint8)
+    if not mask.any():
         raise ValueError("the mask is empty")
-    return area
+    return mask
+
+
+def mask_area(path: Path) -> int:
+    """The pixels of the mass in a mask JPEG (see ``read_lesion_mask``)."""
+    return int(read_lesion_mask(path).sum())
 
 
 def _build_image(

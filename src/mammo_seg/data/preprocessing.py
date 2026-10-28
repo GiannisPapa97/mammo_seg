@@ -1,9 +1,9 @@
-"""Preprocessing of mammograms: from a raw DICOM image to the model input.
+"""Preprocessing of mammograms: from a raw image to the model input.
 
-The chain is: read the DICOM, crop to the breast, rescale so the longer side has a
-fixed length, flip right breasts so every chest wall is on the same side, and
-normalize the intensities. The same code runs for training (where the first steps
-are cached on disk) and for inference, so both see identical input.
+The chain is: read the image (DICOM, or JPEG for CBIS-DDSM), crop to the breast,
+rescale so the longer side has a fixed length, flip so every chest wall is on the
+left, and normalize the intensities. The same code runs for training (where the
+first steps are cached on disk) and for inference, so both see identical input.
 
 ``preprocess`` runs the first four steps on an image and ``preprocess_mask`` applies
 the same geometry to its mask (``preprocess_points`` to points, such as the
@@ -31,9 +31,10 @@ DEFAULT_DOWNSCALE = 8  # the breast mask is made on every 8th pixel
 DEFAULT_OPENING = 1  # removes bright strips thinner than about 3 mask pixels
 DEFAULT_SIZE = 1024  # length of the longer side after rescaling
 DEFAULT_MAX_INTENSITY = 4095  # the 12-bit range of the INbreast images
+IMAGE_SUFFIXES: Final = (".jpg", ".jpeg", ".png")  # read as images, the rest as DICOM
 
 # Right breasts are flipped so the chest wall is always on the left, where it
-# already is in the left breasts.
+# already is in the left breasts (``orientation="laterality"``, INbreast).
 FLIPPED_LATERALITY: Final = "R"
 
 ScalarT = TypeVar("ScalarT", bound=np.generic)
@@ -77,34 +78,35 @@ class BoundingBox:
         return pixels[self.top : self.bottom, self.left : self.right]
 
 
-def breast_bbox(
+def breast_region(
     pixels: npt.NDArray[np.number[Any]],
     threshold: int = DEFAULT_THRESHOLD,
-    margin: float = DEFAULT_MARGIN,
     downscale: int = DEFAULT_DOWNSCALE,
     opening: int = DEFAULT_OPENING,
-) -> BoundingBox:
-    """The smallest box around the breast, plus a margin.
+    border: int = 0,
+) -> npt.NDArray[np.bool_]:
+    """The breast on every ``downscale``-th pixel of the image, as a boolean mask.
 
     The breast is the largest connected region (8-connected) of pixels brighter
     than ``threshold``. Taking the largest region keeps stray bright pixels,
-    labels and markers in the background from widening the box. The mask is made
-    on every ``downscale``-th pixel, which is fast and good enough for a box (its
-    edges are accurate to ``downscale`` pixels, far less than the margin), and is
-    ``opening`` times morphologically opened to cut off thin bright strips along
-    the image border that touch the breast. ``margin`` is a fraction of the box
-    height and width added on every side, limited to the image.
+    labels and markers in the background out of it. The mask is ``opening`` times
+    morphologically opened to cut off thin bright strips along the image border
+    that touch the breast, and the outer ``border`` mask pixels on every side are
+    left out first, for the bright film edges of scanned mammograms.
 
     Raises ValueError for an image that is not 2-D, invalid arguments, or an image
     with no breast.
     """
     if pixels.ndim != 2:
         raise ValueError(f"expected a 2-D image, got {pixels.ndim} dimensions")
-    if margin < 0:
-        raise ValueError(f"the margin cannot be negative, got {margin}")
-    if downscale < 1 or opening < 0:
-        raise ValueError("downscale must be at least 1 and opening at least 0")
+    if downscale < 1 or opening < 0 or border < 0:
+        raise ValueError(
+            "downscale must be at least 1, opening at least 0 and border at least 0"
+        )
     mask = pixels[::downscale, ::downscale] > threshold
+    if border:
+        mask[:border] = mask[-border:] = False
+        mask[:, :border] = mask[:, -border:] = False
     if opening:
         mask = ndimage.binary_opening(
             mask, structure=np.ones((3, 3)), iterations=opening
@@ -113,8 +115,27 @@ def breast_bbox(
     if count == 0:
         raise ValueError(f"no breast found: no region of pixels above {threshold}")
     sizes = np.bincount(regions.ravel())[1:]
-    rows, cols = ndimage.find_objects(regions)[int(sizes.argmax())]
-    rows_max, cols_max = pixels.shape
+    region: npt.NDArray[np.bool_] = regions == int(sizes.argmax()) + 1
+    return region
+
+
+def region_bbox(
+    region: npt.NDArray[np.bool_],
+    shape: Shape,
+    downscale: int = DEFAULT_DOWNSCALE,
+    margin: float = DEFAULT_MARGIN,
+) -> BoundingBox:
+    """The smallest box around a ``breast_region`` in an image of ``shape``, plus a
+    margin.
+
+    The edges are accurate to ``downscale`` pixels, far less than the margin.
+    ``margin`` is a fraction of the box height and width added on every side,
+    limited to the image. Raises ValueError for a negative margin.
+    """
+    if margin < 0:
+        raise ValueError(f"the margin cannot be negative, got {margin}")
+    rows, cols = ndimage.find_objects(region.astype(np.uint8))[0]
+    rows_max, cols_max = shape
     top, bottom = rows.start * downscale, min(rows_max, rows.stop * downscale)
     left, right = cols.start * downscale, min(cols_max, cols.stop * downscale)
     pad_rows = round(margin * (bottom - top))
@@ -125,6 +146,41 @@ def breast_bbox(
         left=max(0, left - pad_cols),
         right=min(cols_max, right + pad_cols),
     )
+
+
+def breast_bbox(
+    pixels: npt.NDArray[np.number[Any]],
+    threshold: int = DEFAULT_THRESHOLD,
+    margin: float = DEFAULT_MARGIN,
+    downscale: int = DEFAULT_DOWNSCALE,
+    opening: int = DEFAULT_OPENING,
+    border: int = 0,
+) -> BoundingBox:
+    """The smallest box around the breast (``breast_region``), plus a margin.
+
+    Raises ValueError for an image that is not 2-D, invalid arguments, or an image
+    with no breast.
+    """
+    if margin < 0:
+        raise ValueError(f"the margin cannot be negative, got {margin}")
+    region = breast_region(pixels, threshold, downscale, opening, border)
+    return region_bbox(region, (pixels.shape[0], pixels.shape[1]), downscale, margin)
+
+
+def chest_wall_on_right(
+    pixels: npt.NDArray[np.number[Any]],
+    region: npt.NDArray[np.bool_],
+    downscale: int = DEFAULT_DOWNSCALE,
+) -> bool:
+    """Whether the chest wall is on the right of the image, from the image itself.
+
+    The breast is thickest, so brightest, at the chest wall: the wall is on the
+    side whose half of the image holds more of the intensity of the breast region.
+    For datasets whose orientation does not follow the laterality (CBIS-DDSM).
+    """
+    breast = np.where(region, pixels[::downscale, ::downscale], 0).astype(np.float64)
+    half = breast.shape[1] // 2
+    return bool(breast[:, breast.shape[1] - half :].sum() > breast[:, :half].sum())
 
 
 @dataclass(frozen=True, config=_CONFIG)
@@ -143,6 +199,11 @@ class PreprocessingSettings:
     max_intensity: Annotated[int, Field(ge=1)] = DEFAULT_MAX_INTENSITY
     # Per-image scaling by this percentile of the tissue instead of max_intensity.
     percentile: Annotated[float, Field(gt=0, le=100)] | None = None
+    # Mask pixels left out on every side when finding the breast.
+    border: Annotated[int, Field(ge=0)] = 0
+    # How the side of the chest wall is known: from the laterality (right breasts
+    # are flipped) or from the image (``chest_wall_on_right``).
+    orientation: Literal["laterality", "image"] = "laterality"
 
 
 @dataclass(frozen=True, config=_CONFIG)
@@ -163,12 +224,22 @@ class PreprocessParams:
 
 
 def read_pixels(path: Path) -> Pixels:
-    """The raw pixel values of a DICOM mammogram as a 2-D ``uint16`` array.
+    """The raw pixel values of a mammogram as a 2-D ``uint16`` array.
 
-    Only what the dataset contains is supported: one channel, unsigned integers up
-    to 16 bits, bright tissue on a dark background (``MONOCHROME2``) and no rescale
-    slope or intercept. Anything else raises ValueError instead of being guessed.
+    A file with one of the ``IMAGE_SUFFIXES`` is read as an image, which must be
+    8-bit grey (the JPEGs of CBIS-DDSM); its values stay 0 to 255. Any other file is
+    read as DICOM, and only what INbreast contains is supported: one channel,
+    unsigned integers up to 16 bits, bright tissue on a dark background
+    (``MONOCHROME2``) and no rescale slope or intercept. Anything else raises
+    ValueError instead of being guessed.
     """
+    if path.suffix.lower() in IMAGE_SUFFIXES:
+        with Image.open(path) as image:
+            if image.mode != "L":
+                raise ValueError(
+                    f"{path.name}: expected an 8-bit grey image, got mode {image.mode}"
+                )
+            return np.asarray(image).astype(np.uint16)
     dataset = pydicom.dcmread(path)
     if dataset.get("SamplesPerPixel", 1) != 1:
         raise ValueError(f"{path.name}: expected one channel")
@@ -217,24 +288,32 @@ def preprocess(
     settings: PreprocessingSettings = PreprocessingSettings(),  # noqa: B008
 ) -> tuple[Pixels, PreprocessParams]:
     """Crop to the breast, rescale so the longer side is ``settings.size`` and flip
-    right breasts. Returns the image (``uint16``, intensities unchanged apart from
-    the averaging of the rescale) and what was done.
+    so the chest wall is on the left: right breasts, or the images whose chest wall
+    is on the right (``settings.orientation``). Returns the image (``uint16``,
+    intensities unchanged apart from the averaging of the rescale) and what was
+    done.
 
     Raises ValueError for an image with no breast or an unknown laterality.
     """
     if laterality not in ("L", "R"):
         raise ValueError(f"laterality must be L or R, got {laterality!r}")
-    box = breast_bbox(
+    region = breast_region(
         pixels,
         settings.threshold,
-        settings.margin,
         settings.downscale,
         settings.opening,
+        settings.border,
+    )
+    box = region_bbox(
+        region, (pixels.shape[0], pixels.shape[1]), settings.downscale, settings.margin
     )
     shape = target_shape(box.height, box.width, settings.size)
     resized = _resize(box.crop(pixels), shape)
     result = np.clip(np.rint(resized), 0, np.iinfo(np.uint16).max).astype(np.uint16)
-    flipped = laterality == FLIPPED_LATERALITY
+    if settings.orientation == "laterality":
+        flipped = laterality == FLIPPED_LATERALITY
+    else:
+        flipped = chest_wall_on_right(pixels, region, settings.downscale)
     if flipped:
         result = np.ascontiguousarray(result[:, ::-1])
     params = PreprocessParams(
