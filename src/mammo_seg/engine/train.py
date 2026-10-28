@@ -166,6 +166,9 @@ class EpochRecord:
     # The most GPU memory PyTorch held during the epoch, training and validation;
     # None off the GPU, and in the history of a run from before it was recorded.
     peak_gpu_memory_gb: float | None = None
+    # The training loss on the validation images (see ``validate``); None in the
+    # history of a run from before it was recorded.
+    validation_loss: float | None = None
 
 
 # Settings that may differ between the sessions of one run: they do not change what
@@ -280,16 +283,31 @@ def validate(
     amp: bool,
     inference: Inference = "whole",
     window: tuple[int, int] | None = None,
-) -> Summary:
+    loss_function: DiceBCELoss | None = None,
+) -> tuple[Summary, float]:
     """The metrics of the model on every image of the loader, predicted in one pass
-    or in sliding windows of ``window`` (see ``inference.predict``)."""
+    or in sliding windows of ``window`` (see ``inference.predict``), and the mean
+    loss per image.
+
+    The loss is ``loss_function`` (by default ``DiceBCELoss()``) on the
+    probabilities, with the padding counted as background as in training, so it is
+    the training objective on images the model does not train on; the metrics leave
+    the padding out. Without images, the metrics and the loss are NaN.
+    """
+    loss_function = loss_function or DiceBCELoss()
     model.eval()
     scores = []
+    total_loss = 0.0
     for batch in loader:
         images, masks, valid = _to_device(batch, device)
         probabilities = predict(model, images, inference, window, amp)
         scores.extend(image_scores(probabilities, masks, valid))
-    return summarize(scores)
+        # The images of a batch share a canvas, so the loss of a batch is the mean
+        # of the loss of its images.
+        everywhere = torch.ones_like(masks, dtype=torch.bool)
+        loss = loss_function.from_probabilities(probabilities, masks, everywhere)
+        total_loss += loss.item() * len(images)
+    return summarize(scores), total_loss / len(scores) if scores else math.nan
 
 
 def _json_safe(value: Any) -> Any:
@@ -312,7 +330,12 @@ def describe(record: EpochRecord, selection_metric: str) -> str:
     return (
         f"epoch {record.epoch}: lr {record.learning_rate:.2e}, "
         f"train loss {record.train_loss:.4f}, "
-        f"validation Dice {everything.dice:.4f} (with mass {positives.dice:.4f}, "
+        + (
+            f"validation loss {record.validation_loss:.4f}, "
+            if record.validation_loss is not None
+            else ""
+        )
+        + f"validation Dice {everything.dice:.4f} (with mass {positives.dice:.4f}, "
         f"sensitivity {positives.sensitivity:.4f}), "
         f"false alarms {record.validation.without_mass.false_alarm_rate:.3f}, "
         f"{selection_metric} {record.selection_value:.4f}, {record.seconds:.0f} s"
@@ -558,7 +581,9 @@ def fit(
             model, train_loader, loss_function, optimizer, scaler, device, amp
         )
         scheduler.step()
-        summary = validate(model, validation_loader, device, amp, inference, window)
+        summary, validation_loss = validate(
+            model, validation_loader, device, amp, inference, window, loss_function
+        )
         value = selection_value(summary, settings.selection_metric)
         record = EpochRecord(
             epoch=epoch,
@@ -568,6 +593,7 @@ def fit(
             validation=summary,
             selection_value=value,
             peak_gpu_memory_gb=peak_memory_gb(device),
+            validation_loss=validation_loss,
         )
         slowest = max(slowest, record.seconds)
         progress.history.append(record)
