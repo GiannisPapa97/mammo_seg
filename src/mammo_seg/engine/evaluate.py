@@ -51,7 +51,7 @@ Dice of 1 on every image without a mass.
 """
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -726,12 +726,29 @@ def details_to_dict(evaluation: Evaluation) -> dict[str, Any]:
     return content
 
 
+# The scores the best setting is chosen by, in order: the first one defined for some
+# setting is used.
+_SELECTION_SCORES: dict[str, Callable[[SettingResult], float]] = {
+    "balanced Dice": lambda result: result.balanced_dice,
+    "mass Dice": lambda result: result.summary.with_mass.dice,
+}
+
+
+def selection_score(results: FoldEvaluation) -> str:
+    """The score the best setting is chosen by: the balanced Dice, or the Dice on
+    the images with a mass when there are no images without one (as on CBIS-DDSM),
+    which leaves the balanced Dice undefined."""
+    for name, score in _SELECTION_SCORES.items():
+        if any(not math.isnan(score(result)) for result in results.settings):
+            return name
+    raise ValueError("no setting has a defined balanced Dice or mass Dice")
+
+
 def best_setting(results: FoldEvaluation) -> SettingResult:
-    """The setting with the highest balanced Dice (an undefined one never wins)."""
-    defined = [r for r in results.settings if not math.isnan(r.balanced_dice)]
-    if not defined:
-        raise ValueError("no setting has a defined balanced Dice")
-    return max(defined, key=lambda r: r.balanced_dice)
+    """The setting with the highest selection score (an undefined one never wins)."""
+    score = _SELECTION_SCORES[selection_score(results)]
+    defined = [r for r in results.settings if not math.isnan(score(r))]
+    return max(defined, key=score)
 
 
 def _show(value: float, digits: int = 3) -> str:
@@ -764,10 +781,11 @@ def _label(result: SettingResult, mark: str = " ") -> str:
 
 
 def format_evaluation(evaluation: Evaluation) -> str:
-    """The pooled sweep (best balanced Dice marked ``*``), the baseline, and the
-    folds at the best setting, as text."""
+    """The pooled sweep (best setting marked ``*``), the baseline, and the folds at
+    the best setting, as text."""
     pooled = evaluation.pooled
     best = best_setting(pooled)
+    score = selection_score(pooled)
     kinds = sorted(set(evaluation.inference.values()))
     lines = [
         f"{evaluation.checkpoint} on the {evaluation.on} images "
@@ -780,6 +798,7 @@ def format_evaluation(evaluation: Evaluation) -> str:
         lines.append(_row(_label(result, "*" if result is best else " "), result))
     lines.append(_row(f"{'predict nothing':>19}", pooled.baseline))
     lines += [
+        f"* the best {score}",
         "",
         f"per fold at threshold {best.setting.threshold}, "
         f"min area {best.setting.min_area_mm2:g} mm²:",
