@@ -258,8 +258,9 @@ def test_the_colab_notebook_settings_are_valid() -> None:
 
 
 def test_the_colab_training_and_evaluation_read_the_same_data_and_runs() -> None:
-    names = ("DATA_ARCHIVE", "RUN_NAME")
+    names = ("DATASET", "RUN_NAME")
     assert settings_of(COLAB, *names) == settings_of(COLAB_EVALUATION, *names)
+    assert settings_of(COLAB, "DATASET")["DATASET"] in ("inbreast", "cbis-ddsm")
     for notebook in (COLAB, COLAB_EVALUATION):
         code = "".join("".join(c["source"]) for c in read(notebook)["cells"])
         assert 'DRIVE_DIR = Path("/content/drive/MyDrive/' in code
@@ -299,3 +300,40 @@ def test_a_colab_notebook_records_the_commit_of_its_code(
     assert len(recorded) == 1 and 'tee -a "{VERSION}"' in recorded[0]
     code = "".join("".join(c["source"]) for c in read(notebook)["cells"])
     assert f'VERSION = RUNS / "{name}"' in code
+
+
+def code_of(notebook: Path) -> str:
+    return "".join("".join(c["source"]) for c in read(notebook)["cells"])
+
+
+def test_the_colab_archive_is_that_of_the_dataset() -> None:
+    for notebook in (COLAB, COLAB_EVALUATION):
+        code = code_of(notebook)
+        assert 'PROCESSED = WORK / "data" / "processed" / DATASET' in code
+        assert '"mammo_seg_data" / "processed" / DATASET' in code
+
+
+@pytest.mark.parametrize(
+    ("notebook", "step", "options"),
+    [
+        (COLAB, "train", "--positive-fraction none"),
+        (COLAB_EVALUATION, "evaluate", "--min-areas-mm2 0"),
+    ],
+    ids=lambda value: value.name if isinstance(value, Path) else "",
+)
+def test_cbis_ddsm_gets_its_options_before_those_of_the_notebook(
+    notebook: Path, step: str, options: str
+) -> None:
+    code = code_of(notebook)
+    assert f'DATASET_OPTIONS = "{options}" if DATASET == "cbis-ddsm" else ""' in code
+    cli.build_parser().parse_args([step, *options.split()])
+    (command,) = [c for c in commands(notebook) if c.startswith("mammo-seg ")]
+    extra = "{TRAIN_OPTIONS}" if notebook == COLAB else "{EVALUATE_OPTIONS}"
+    assert command.index("{DATASET_OPTIONS}") < command.index(extra)
+
+
+def test_the_colab_training_can_start_from_a_checkpoint_on_drive() -> None:
+    assert settings_of(COLAB, "INIT_FROM") == {"INIT_FROM": None}
+    code = code_of(COLAB)
+    assert "START = DRIVE_DIR / INIT_FROM if INIT_FROM else None" in code
+    assert """DATASET_OPTIONS += f' --init-from "{START}"'""" in code
