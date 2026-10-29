@@ -50,6 +50,7 @@ from mammo_seg.engine.evaluate import (
     pixel_area_mm2,
     remove_small_regions,
     score_batch,
+    selection_score,
     settings_grid,
     subgroups_of,
     summarize_results,
@@ -750,11 +751,41 @@ def test_the_best_setting_has_the_highest_defined_balanced_dice() -> None:
     assert best_setting(sweep()).setting.threshold == 0.5
 
 
-def test_with_no_defined_balanced_dice_there_is_no_best_setting() -> None:
+def test_the_best_setting_is_chosen_by_the_balanced_dice() -> None:
+    assert selection_score(sweep()) == "balanced Dice"
+
+
+def test_without_images_or_scores_there_is_no_best_setting() -> None:
     nothing = summarize_results(PostProcessing(), [])
     results = FoldEvaluation(0, (nothing,), nothing)
     with pytest.raises(ValueError, match="no setting"):
         best_setting(results)
+
+
+@pytest.fixture
+def only_masses(tmp_path: Path) -> Manifest:
+    """Eight patients with one image each, all with a mass, as on CBIS-DDSM."""
+    manifest = make_manifest(8, 0, per_patient=1)
+    write_preprocessed_for(tmp_path / "preprocessed", SETTINGS, manifest)
+    return manifest
+
+
+def test_without_images_without_a_mass_the_mass_dice_chooses_the_setting(
+    tmp_path: Path, only_masses: Manifest
+) -> None:
+    evaluation = evaluate(
+        tmp_path, only_masses, settings=settings_grid((0.1, 0.5, 0.99), (0,))
+    )
+    pooled = evaluation.pooled
+    assert all(math.isnan(r.balanced_dice) for r in pooled.settings)
+    assert selection_score(pooled) == "mass Dice"
+    best = best_setting(pooled)
+    assert best.summary.with_mass.dice == max(
+        r.summary.with_mass.dice for r in pooled.settings
+    )
+    text = format_evaluation(evaluation)
+    assert "* the best mass Dice" in text
+    assert sum("* |" in line for line in text.splitlines()) == 1
 
 
 def test_the_results_become_json_with_none_for_undefined_values(
@@ -852,5 +883,6 @@ def test_the_text_shows_the_sweep_the_baseline_and_the_folds(
     assert "predict nothing" in text and "fold 0" in text and "fold 1" in text
     assert "by subgroup" in text and "without a mass, normal:" in text
     assert "masses under 100 mm²" in text and "dense breasts" in text
-    assert text.count("*") == 1  # the best setting is marked once
+    assert sum("* |" in line for line in text.splitlines()) == 1  # marked once
+    assert "* the best balanced Dice" in text
     assert len({len(line) for line in text.splitlines() if " | " in line}) == 1
