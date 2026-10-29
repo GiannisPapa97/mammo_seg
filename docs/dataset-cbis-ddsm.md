@@ -2,7 +2,7 @@
 
 Findings on the raw data in `data/raw/cbis-ddsm/`, from exploration scripts and the manifest built by `mammo_seg.data.cbis_ddsm` (see [data-pipeline.md](data-pipeline.md)). Only aggregate figures are given. Source: [awsaf49/cbis-ddsm-breast-cancer-image-dataset](https://www.kaggle.com/datasets/awsaf49/cbis-ddsm-breast-cancer-image-dataset) on Kaggle, which repackages the CBIS-DDSM collection of The Cancer Imaging Archive (TCIA) as JPEG images. CBIS-DDSM (Curated Breast Imaging Subset of DDSM) is a curated part of the Digital Database for Screening Mammography: scanned film mammograms.
 
-**Scope:** the project uses the **masses** of CBIS-DDSM, to pretrain before INbreast. The manifest, the masks, the preprocessing and the splits are built so far ([data-pipeline.md](data-pipeline.md)); training does not read it yet.
+**Scope:** the project uses the **masses** of CBIS-DDSM, to pretrain before INbreast: the manifest, the masks, the preprocessing and the splits are described in [data-pipeline.md](data-pipeline.md), training and evaluation in [training.md](training.md), and the pretraining run in `results/2026-10-29_cbis_ddsm_pretraining/README.md`.
 
 ## License and use
 
