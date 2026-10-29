@@ -9,7 +9,9 @@ the metrics of ``metrics.py`` under a grid of post-processing settings:
   than this are removed (8-connectivity), so a stray spot of a few pixels no longer
   counts as a false alarm. It is in mm², not pixels, because a preprocessed pixel
   covers 0.13 to 0.28 mm depending on the size of the breast; its area comes from
-  the preprocessing record (``pixel_area_mm2``).
+  the preprocessing record (``pixel_area_mm2``). For images of unknown pixel size
+  (CBIS-DDSM) only a minimum of 0 can be used, and the areas of the masses and
+  false regions are left out (None).
 
 Besides the per-image metrics, every setting is scored per lesion: the masses are
 the connected regions of the mask, and a mass is **found** when a predicted region
@@ -101,8 +103,18 @@ class PostProcessing:
                 f"the minimum area cannot be negative: {self.min_area_mm2}"
             )
 
-    def min_pixels(self, pixel_area_mm2: float) -> int:
-        """The minimum region size in pixels of ``pixel_area_mm2`` each."""
+    def min_pixels(self, pixel_area_mm2: float | None) -> int:
+        """The minimum region size in pixels of ``pixel_area_mm2`` each.
+
+        Raises ValueError for a minimum above 0 when the pixel area is unknown.
+        """
+        if pixel_area_mm2 is None:
+            if self.min_area_mm2:
+                raise ValueError(
+                    "a minimum region size in mm² needs the pixel size, which this "
+                    "dataset does not have; use a minimum of 0 (--min-areas-mm2 0)"
+                )
+            return 0
         return math.ceil(self.min_area_mm2 / pixel_area_mm2)
 
 
@@ -120,7 +132,8 @@ def settings_grid(
 class ImageInfo:
     """What the scoring needs to know about an image besides its tensors."""
 
-    pixel_area_mm2: float  # the area of one preprocessed pixel
+    # The area of one preprocessed pixel; None when the pixel size is unknown.
+    pixel_area_mm2: float | None
     birads: str | None  # the BI-RADS category of the image, e.g. "4a"; None if none
     acr: int | None  # the ACR breast density, 1 to 4; None if unknown
     # Which image it is, for the details of an evaluation; empty when unknown.
@@ -140,18 +153,18 @@ def image_infos(
     record: PreprocessingRecord, manifest: Manifest, file_ids: Sequence[str]
 ) -> dict[str, ImageInfo]:
     """The ``ImageInfo`` of every image of ``file_ids``, from the preprocessing and
-    the manifest. Raises ValueError for an image of unknown pixel size."""
+    the manifest; the pixel area is None for an image of unknown pixel size."""
     images = {image.file_id: image for image in manifest.images}
     infos = {}
     for file_id in file_ids:
         image = images[file_id]
-        if image.pixel_size_mm is None:
-            raise ValueError(
-                f"image {file_id}: the pixel size is unknown, so areas in mm² "
-                "cannot be computed"
-            )
+        area = (
+            None
+            if image.pixel_size_mm is None
+            else pixel_area_mm2(record.images[file_id], image.pixel_size_mm)
+        )
         infos[file_id] = ImageInfo(
-            pixel_area_mm2(record.images[file_id], image.pixel_size_mm),
+            area,
             image.birads,
             image.acr,
             file_id,
@@ -177,7 +190,7 @@ class MassResult:
     """One mass of an image: its area, where it is, and how a predicted region
     found it."""
 
-    area_mm2: float
+    area_mm2: float | None  # None when the pixel size is unknown
     found: bool  # a predicted region overlaps it with an IoU of at least HIT_IOU
     iou: float  # the best IoU of a predicted region with it; 0 if none overlaps
     row: float  # its centre, in pixels of the preprocessed image
@@ -191,7 +204,7 @@ class MassResult:
 class FalseRegion:
     """A predicted region that found no mass: its area and where it is."""
 
-    area_mm2: float
+    area_mm2: float | None  # None when the pixel size is unknown
     row: float  # its centre, in pixels of the preprocessed image
     col: float
     peak: float  # the highest predicted probability inside it
@@ -227,12 +240,13 @@ def _peaks(
 def match_lesions(
     predicted: npt.NDArray[np.bool_],
     truth: npt.NDArray[np.bool_],
-    pixel_area_mm2: float,
+    pixel_area_mm2: float | None,
     probabilities: npt.NDArray[np.floating[Any]],
 ) -> tuple[tuple[MassResult, ...], tuple[FalseRegion, ...]]:
     """The masses of a ``[H, W]`` mask, each found or not, and the false regions of
     a ``[H, W]`` prediction (see the module docstring), with the highest of the
-    ``[H, W]`` ``probabilities`` inside each.
+    ``[H, W]`` ``probabilities`` inside each. The areas are None when
+    ``pixel_area_mm2`` is.
 
     Raises ValueError if the probabilities do not have the shape of the mask.
     """
@@ -257,9 +271,13 @@ def match_lesions(
         _centres(masses, n_masses),
         _centres(regions, n_regions),
     )
+
+    def area(size: int) -> float | None:
+        return None if pixel_area_mm2 is None else float(size * pixel_area_mm2)
+
     found = tuple(
         MassResult(
-            float(size * pixel_area_mm2),
+            area(size),
             bool(hit),
             float(score),
             float(r),
@@ -276,7 +294,7 @@ def match_lesions(
         )
     )
     false = tuple(
-        FalseRegion(float(size * pixel_area_mm2), float(r), float(c), float(peak))
+        FalseRegion(area(size), float(r), float(c), float(peak))
         for size, matched, (r, c), peak in zip(
             region_sizes,
             hits.any(axis=0),
@@ -413,7 +431,12 @@ def subgroups_of(results: Sequence[ImageResult]) -> Subgroups:
         )
 
     def size(small: bool) -> MassGroup:
-        group = [m for m in masses if (m.area_mm2 < DEFAULT_SMALL_MASS_MM2) == small]
+        # A mass of unknown area is in neither group.
+        group = [
+            m
+            for m in masses
+            if m.area_mm2 is not None and (m.area_mm2 < DEFAULT_SMALL_MASS_MM2) == small
+        ]
         return MassGroup(len(group), _mean([float(m.found) for m in group]))
 
     return Subgroups(
@@ -610,13 +633,17 @@ def evaluate_folds(
                 "windows; it was trained before they existed"
             )
         window = (int(stored[0]), int(stored[1])) if stored is not None else None
+        infos = image_infos(record, manifest, ids)
+        for info in infos.values():  # before predicting, so it fails at once
+            for setting in settings:
+                setting.min_pixels(info.pixel_area_mm2)
         model = model_from_checkpoint(checkpoint).to(device)
         results = evaluate_model(
             model,
             evaluation_loader(dataset, batch_size, num_workers),
             settings,
             device,
-            image_infos(record, manifest, ids),
+            infos,
             amp,
             chosen,
             window,

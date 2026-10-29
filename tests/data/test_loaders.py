@@ -85,7 +85,9 @@ def test_a_fraction_outside_0_and_1_is_rejected(fraction: float) -> None:
 def test_one_class_alone_cannot_be_balanced() -> None:
     with pytest.raises(ValueError, match="0 images with a mass and 3 without"):
         balanced_sampler([False, False, False])
-    with pytest.raises(ValueError, match="2 images with a mass and 0 without"):
+    with pytest.raises(ValueError, match="2 images with a mass and 0 without; "):
+        balanced_sampler([True, True])
+    with pytest.raises(ValueError, match="--positive-fraction none"):
         balanced_sampler([True, True])
 
 

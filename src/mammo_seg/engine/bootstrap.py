@@ -119,8 +119,10 @@ def _image_terms(
     nothing = (0.0, 0.0)
     has_mass = bool(image["has_mass"])
     masses = result["masses"]
-    small = [mass for mass in masses if mass["area_mm2"] < small_mass_mm2]
-    large = [mass for mass in masses if mass["area_mm2"] >= small_mass_mm2]
+    # A mass of unknown area (no pixel size) is in neither size group.
+    sized = [mass for mass in masses if mass["area_mm2"] is not None]
+    small = [mass for mass in sized if mass["area_mm2"] < small_mass_mm2]
+    large = [mass for mass in sized if mass["area_mm2"] >= small_mass_mm2]
 
     def found(group: Sequence[Mapping[str, Any]]) -> tuple[float, float]:
         return float(sum(mass["found"] for mass in group)), float(len(group))

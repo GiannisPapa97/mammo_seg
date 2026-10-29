@@ -22,7 +22,7 @@ from mammo_seg.engine.bootstrap import (
 SETTING = {"threshold": 0.5, "min_area_mm2": 0.0}
 
 
-def mass(area_mm2: float, found: bool) -> dict[str, Any]:
+def mass(area_mm2: float | None, found: bool) -> dict[str, Any]:
     return {"area_mm2": area_mm2, "found": found}
 
 
@@ -285,3 +285,15 @@ def test_the_table_shows_an_undefined_value_and_a_missing_interval() -> None:
     text = format_result(Intervals(1, 1, 10, 0, 0.95, metrics))
     assert "masses found              0.500\n" in text
     assert "false regions per image   n/a" in text
+
+
+def test_masses_of_unknown_area_count_only_among_all_masses() -> None:
+    found = details(
+        image("1", "p1", masses=(mass(None, True), mass(None, False))),
+        image("2", "p2", masses=(mass(None, True),)),
+    )
+    result = run(found)
+    values = {name: metric.value for name, metric in result.metrics.items()}
+    assert values["masses_found"] == pytest.approx(2 / 3)
+    assert math.isnan(values["small_masses_found"])
+    assert math.isnan(values["large_masses_found"])

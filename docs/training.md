@@ -96,7 +96,7 @@ A checkpoint is about 100 MB of weights for the default model, and about 300 MB 
 
 `train_fold(manifest, splits_file, preprocessed_dir, fold, ...)` (`engine/train.py`) trains on every fold of the patient-level splits but one and validates on that one. Each epoch is a pass of training and a pass of validation:
 
-- **Training** draws batches balanced between images with and without a mass (the sampler of `loaders.py`, 50% by default), applies the augmentation, and minimizes the Dice + cross-entropy loss with AdamW, on every pixel including the padding (section 2). The learning rate starts at 1e-4 and follows a cosine curve down to 0 over the epochs.
+- **Training** draws batches balanced between images with and without a mass (the sampler of `loaders.py`, 50% by default; `--positive-fraction none` turns it off and uses every image once per epoch, which data where every image has a mass, such as CBIS-DDSM, needs: the sampler refuses it otherwise), applies the augmentation, and minimizes the Dice + cross-entropy loss with AdamW, on every pixel including the padding (section 2). The learning rate starts at 1e-4 and follows a cosine curve down to 0 over the epochs.
 - **Weight decay** (`--weight-decay W`, 0 by default): AdamW is Adam with a decoupled weight decay, which multiplies every weight by 1 - learning rate × W at each step, a regularization against overfitting. It applies to all weights, the biases and normalization layers too. At 0, AdamW makes exactly the steps of Adam (a test checks this), so runs without it train as before. At the learning rate of 1e-4, W = 0.01 shrinks a weight by 1e-6 per step, so a noticeable effect needs larger values.
 - **Augmentation** (`--rotation`, `--scale`, `--shift`, `--brightness`, `--contrast`, `--gamma`, `--noise`, `--elastic`, `--elastic-spacing`): the random changes of the training images, described in [data-pipeline.md](data-pipeline.md); the defaults are mild and the elastic deformation is off.
 - **Crops** (`--crop-size N`, off by default): training can use square patches of N pixels instead of whole images, half of them (`--crop-mass-fraction`) placed around a mass when the image has one (see the augmentation in [data-pipeline.md](data-pipeline.md)). The training canvas is then the crop size rounded up to a multiple of 32, so batches are cheaper and a larger `--batch-size` fits. Validation scores whole images either way, but a model trained on crops predicts them in sliding windows of the training canvas (see *How a whole image is predicted* below). The crop settings are saved in the checkpoint, and a run cannot be resumed with other ones.
@@ -149,6 +149,10 @@ The random draws of an epoch (the sampler and the augmentation) depend only on t
 - **Every epoch has its own seed**, mixed from the run's seed and the epoch number by NumPy's `SeedSequence` (`epoch_seed`). It seeds PyTorch and the loader's generator before the epoch. An earlier version used the sum of the two, so a run with seed 1 drew at epoch 1 exactly what a run with seed 0 drew at epoch 2: runs with neighbouring seeds shared their batches and looked more alike than independent runs.
 - **The data loader workers are started again for every epoch**, not kept between epochs. A kept worker goes on with the random state it started with, so reseeding before an epoch did not reach it. With `--num-workers 2`, as on Kaggle, a resumed run then drew other images and other augmentations than one that never stopped, so the earlier runs that went on in a later session cannot be repeated exactly. Restarting the workers costs a moment per epoch.
 
+### Starting from another model
+
+`--init-from <checkpoint>` starts the training from the weights of another checkpoint instead of random or ImageNet ones, for example a model pretrained on CBIS-DDSM and trained further on INbreast. Its architecture and encoder must be those of the run, and it is an error otherwise; its preprocessing may differ (CBIS-DDSM is divided by 255, INbreast by 4095, so both reach the model on the same 0..1 scale). The path is stored in the checkpoints (`init_from`), so a run is resumed only with the same one. `--encoder-weights` is not needed then: ImageNet weights would be downloaded and replaced at once.
+
 ## 5. Running it
 
 The `mammo-seg` command (installed with the package) runs the data steps and the training; the options are listed by `mammo-seg train --help`.
@@ -157,6 +161,13 @@ The `mammo-seg` command (installed with the package) runs the data steps and the
 mammo-seg train --fold 0 --output-dir runs                   # a GPU if there is one, else the CPU
 mammo-seg train --fold 0 --output-dir runs --resume          # continue after a stop
 mammo-seg train --epochs 30 --selection-metric with_mass.dice --device cuda
+
+# Pretraining on CBIS-DDSM, then training further on INbreast
+P=data/processed/cbis-ddsm
+mammo-seg train --manifest $P/manifest.json --splits $P/splits.json \
+  --preprocessed-dir $P/preprocessed --positive-fraction none --encoder resnet18 \
+  --fold 0 --output-dir runs_cbis
+mammo-seg train --encoder resnet18 --init-from runs_cbis/fold_0/best.pt --fold 0
 ```
 
 The data steps are the same commands as `python -m mammo_seg.data.<step>`: `mammo-seg manifest`, `splits`, `masks` and `preprocess`. Training reads the preprocessing settings and the canvas from the preprocessed data, so they cannot disagree with it.
@@ -185,6 +196,8 @@ mammo-seg evaluate --runs-dir runs --folds 0 1 --thresholds 0.4 0.5 --min-areas-
 ```
 
 Each probability map is turned into a prediction under every combination of a **threshold** (0.3 to 0.7 by default) and a **minimum region size** in mm² (`--min-areas-mm2`; 0, 2, 5 and 10 mm² by default): connected regions (8-connectivity) of predicted pixels smaller than the minimum are removed, so a stray spot of a few pixels no longer makes a false alarm. The size is in mm², not pixels, because a preprocessed pixel covers 0.017 to 0.078 mm² depending on the size of the breast (its area comes from `preprocessing.json` and the native pixel of 0.07 mm): 10 mm² is 129 to 579 pixels. The smallest mass is 14.7 mm², so the defaults never remove a whole mass; the earlier default of 1000 pixels removed 12 of the 115.
+
+For CBIS-DDSM, whose images have no pixel size, only a minimum region size of 0 works (`--min-areas-mm2 0`; another one is an error before anything is predicted), and the areas of the masses and false regions are left out (null in the details), so its masses are in neither size group. Its images all have a mass, so the groups of images without one are empty.
 
 For each setting the table gives:
 
@@ -263,6 +276,8 @@ The likely cause of that collapse, and of the earlier failure of whole-image tra
 The fix: the augmentation keeps the background exactly 0 (see the augmentation in [data-pipeline.md](data-pipeline.md)), and the loss counts the padding as background (section 2). On fold 0, 19% of the pixels of the image part of a training patch now lie in a flat area of zeros.
 
 ## Next steps
+
+- Pretrain on CBIS-DDSM (on Colab; a whole-image run at 1024 x 864 does not fit the memory of the local machine) and train further on INbreast with `--init-from`, then compare with the ResNet18 run (`mammo-seg compare`).
 
 - Check where the false positives of the collapsed fold-0 run lie (on the zero background or in the breast), then train folds 0 and 1 with the fix for the flat background and compare them with the run that worked.
 - Run `mammo-seg evaluate` on the folds trained with the fix, to see whether a threshold and a minimum region size reduce the false alarms (not run on real checkpoints yet; the earlier checkpoints belong to the earlier splits).
