@@ -31,6 +31,7 @@ from mammo_seg.engine.train import (
     TrainingResult,
     TrainingSettings,
     describe,
+    encoder_of,
     epoch_seed,
     fit,
     load_weights,
@@ -1223,3 +1224,76 @@ def test_a_fold_starts_from_the_checkpoint_and_records_it(
             canvas=CANVAS,
             resume=True,
         )
+
+
+# --- freezing the encoder ---
+
+
+def encoder_state(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """The weights and the batch normalization statistics of the encoder."""
+    return {k: v.clone() for k, v in encoder_of(model).state_dict().items()}
+
+
+def test_a_frozen_encoder_keeps_its_weights_and_statistics(data: Data) -> None:
+    torch.manual_seed(0)
+    model = build_model(TINY)
+    encoder = encoder_state(model)
+    decoder_module = model.get_submodule("decoder")
+    decoder = {k: v.clone() for k, v in decoder_module.state_dict().items()}
+    train_loader, _ = loaders(data)
+    train_one_epoch(
+        model,
+        train_loader,
+        DiceBCELoss(),
+        torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=0.1),
+        torch.amp.GradScaler("cpu", enabled=False),
+        CPU,
+        amp=False,
+        encoder_frozen=True,
+    )
+    after = encoder_state(model)
+    assert all(torch.equal(encoder[key], after[key]) for key in encoder)
+    assert any(
+        not torch.equal(decoder[key], value)
+        for key, value in decoder_module.state_dict().items()
+    )
+    assert model.training and not encoder_of(model).training
+
+
+def test_the_encoder_is_unfrozen_after_its_epochs(
+    data: Data, caplog: pytest.LogCaptureFixture
+) -> None:
+    torch.manual_seed(0)
+    settings = replace(FAST, epochs=3, freeze_encoder_epochs=2)
+    with caplog.at_level(logging.INFO, logger=train_module.__name__):
+        result = run_fit(data, settings)
+    assert [r.encoder_frozen for r in result.history] == [True, True, False]
+    assert "unfreezing the encoder from epoch 3" in caplog.text
+    assert "encoder frozen" in describe(result.history[0], settings.selection_metric)
+    assert "encoder frozen" not in describe(
+        result.history[2], settings.selection_metric
+    )
+
+
+def test_without_freezing_every_epoch_trains_the_encoder(data: Data) -> None:
+    result = run_fit(data, replace(FAST, epochs=1))
+    assert [r.encoder_frozen for r in result.history] == [False]
+
+
+def test_the_encoder_cannot_be_frozen_for_more_epochs_than_there_are() -> None:
+    assert TrainingSettings(epochs=3, freeze_encoder_epochs=3).freeze_encoder_epochs
+    with pytest.raises(ValidationError, match="frozen for 4 of 3 epochs"):
+        TrainingSettings(epochs=3, freeze_encoder_epochs=4)
+    with pytest.raises(ValidationError):
+        TrainingSettings(freeze_encoder_epochs=-1)
+
+
+def test_a_model_without_an_encoder_cannot_be_frozen() -> None:
+    with pytest.raises(ValueError, match="Linear has no encoder"):
+        encoder_of(torch.nn.Linear(2, 2))
+
+
+def test_a_history_from_before_the_freezing_reads_as_not_frozen() -> None:
+    data = json.loads(record_to_json(replace(record(), encoder_frozen=True)))
+    del data["encoder_frozen"]
+    assert record_from_dict(data).encoder_frozen is False

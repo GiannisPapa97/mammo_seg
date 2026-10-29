@@ -59,6 +59,7 @@ def test_the_defaults_are_the_agreed_training_settings() -> None:
     assert args.encoder_weights == "imagenet"
     assert args.device is None and not args.resume and args.max_minutes is None
     assert args.output_dir == Path("runs")
+    assert args.freeze_encoder_epochs == 0
 
 
 def test_training_on_whole_images_is_the_default() -> None:
@@ -194,13 +195,20 @@ def test_a_start_checkpoint_and_no_balancing_can_be_given(
     pretrained = tmp_path / "pretrained.pt"
     code = cli.main(
         project.train_args(
-            "--init-from", str(pretrained), "--positive-fraction", "none", *TINY
+            "--init-from",
+            str(pretrained),
+            "--positive-fraction",
+            "none",
+            "--freeze-encoder-epochs",
+            "5",
+            *TINY,
         )
     )
     assert code == 0
     ((args, kwargs),) = calls
     assert kwargs["init_from"] == pretrained
     assert args[4].positive_fraction is None
+    assert args[4].freeze_encoder_epochs == 5
 
 
 def test_a_positive_fraction_is_a_number_or_none() -> None:
