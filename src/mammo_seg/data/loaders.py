@@ -102,7 +102,9 @@ def balanced_sampler(
     negatives = len(has_mass) - positives
     if positives == 0 or negatives == 0:
         raise ValueError(
-            f"cannot balance {positives} images with a mass and {negatives} without"
+            f"cannot balance {positives} images with a mass and {negatives} without; "
+            "without images of both kinds, draw every image once (no positive "
+            "fraction, --positive-fraction none)"
         )
     weights = [
         positive_fraction / positives if flag else (1 - positive_fraction) / negatives

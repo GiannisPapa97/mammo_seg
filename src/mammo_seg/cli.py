@@ -77,6 +77,11 @@ STEPS: dict[str, tuple[str, Callable[[Sequence[str] | None], int]]] = {
 }
 
 
+def _fraction_or_none(text: str) -> float | None:
+    """A number, or ``none`` for no value."""
+    return None if text.lower() == "none" else float(text)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The parser of the whole command; the data steps are listed for ``--help``
     only, because ``main`` hands their arguments over to the steps themselves."""
@@ -121,6 +126,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue from last.pt in the output folder; the settings must match",
     )
     run.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help="start from the weights of this checkpoint, for example a model "
+        "pretrained on CBIS-DDSM (same architecture and encoder); --encoder-weights "
+        "is then not needed",
+    )
+    run.add_argument(
         "--max-minutes",
         type=float,
         default=None,
@@ -145,9 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     training.add_argument(
         "--positive-fraction",
-        type=float,
+        type=_fraction_or_none,
         default=0.5,
-        help="share of training images with a mass in an epoch",
+        help="share of training images with a mass in an epoch; none draws every "
+        "image once per epoch (for data where every image has a mass, CBIS-DDSM)",
     )
     training.add_argument(
         "--small-mass-fraction",
@@ -443,6 +457,7 @@ def _train(args: argparse.Namespace) -> int:
                 resume=args.resume,
                 time_limit_minutes=args.max_minutes,
                 inference=args.inference,
+                init_from=args.init_from,
             )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"error: {error}", file=sys.stderr)

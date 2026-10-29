@@ -177,7 +177,38 @@ def test_the_options_become_settings(
     assert kwargs["inference"] is None  # follows the crops
     assert kwargs["resume"] and kwargs["time_limit_minutes"] == 90
     assert kwargs["device"].type == "cpu"
+    assert kwargs["init_from"] is None
     assert "Training ended after 0 epochs (finished)" in capsys.readouterr().out
+
+
+def test_a_start_checkpoint_and_no_balancing_can_be_given(
+    project: Project, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def fake(*args: Any, **kwargs: Any) -> TrainingResult:
+        calls.append((args, kwargs))
+        return result()
+
+    monkeypatch.setattr(train_module, "train_fold", fake)
+    pretrained = tmp_path / "pretrained.pt"
+    code = cli.main(
+        project.train_args(
+            "--init-from", str(pretrained), "--positive-fraction", "none", *TINY
+        )
+    )
+    assert code == 0
+    ((args, kwargs),) = calls
+    assert kwargs["init_from"] == pretrained
+    assert args[4].positive_fraction is None
+
+
+def test_a_positive_fraction_is_a_number_or_none() -> None:
+    parse = cli.build_parser().parse_args
+    assert parse(["train", "--positive-fraction", "0.3"]).positive_fraction == 0.3
+    assert parse(["train", "--positive-fraction", "None"]).positive_fraction is None
+    with pytest.raises(SystemExit):
+        parse(["train", "--positive-fraction", "half"])
 
 
 def test_the_crop_options_become_augmentation_settings(

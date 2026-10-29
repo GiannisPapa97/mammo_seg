@@ -18,7 +18,7 @@ from mammo_seg.data.preprocessing import PreprocessingSettings
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile, create_splits_file
 from mammo_seg.engine import train as train_module
-from mammo_seg.engine.checkpoint import load_checkpoint, load_model
+from mammo_seg.engine.checkpoint import load_checkpoint, load_model, save_checkpoint
 from mammo_seg.engine.losses import DiceBCELoss
 from mammo_seg.engine.metrics import GroupSummary, Summary
 from mammo_seg.engine.model import ModelSettings, build_model
@@ -33,6 +33,7 @@ from mammo_seg.engine.train import (
     describe,
     epoch_seed,
     fit,
+    load_weights,
     peak_memory_gb,
     record_from_dict,
     record_to_json,
@@ -1155,3 +1156,70 @@ def test_a_run_is_not_resumed_with_another_composition(
     with pytest.raises(ValueError, match="composition"):
         run(other, resume=True)
     assert run(COMPOSED, resume=True).stop_reason == "finished"
+
+
+# --- starting from another checkpoint ---
+
+
+def saved_model(path: Path, settings: ModelSettings = TINY) -> torch.nn.Module:
+    torch.manual_seed(5)
+    model = build_model(settings)
+    save_checkpoint(path, model, settings, PreprocessingSettings(max_intensity=255))
+    return model
+
+
+def test_the_weights_of_a_checkpoint_are_loaded(tmp_path: Path) -> None:
+    saved = saved_model(tmp_path / "pretrained.pt")
+    torch.manual_seed(6)
+    model = build_model(TINY)
+    load_weights(model, tmp_path / "pretrained.pt", TINY)
+    for key, value in saved.state_dict().items():
+        assert torch.equal(model.state_dict()[key], value)
+
+
+def test_weights_of_another_architecture_or_encoder_are_refused(
+    tmp_path: Path,
+) -> None:
+    saved_model(tmp_path / "pretrained.pt")
+    other = replace(TINY, architecture="fpn")
+    with pytest.raises(ValueError, match="is a unet with a tu-mobilenetv3"):
+        load_weights(build_model(other), tmp_path / "pretrained.pt", other)
+
+
+def test_a_fold_starts_from_the_checkpoint_and_records_it(
+    data: Data, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pretrained = tmp_path / "pretrained.pt"
+    saved_model(pretrained)
+    with caplog.at_level(logging.INFO, logger=train_module.__name__):
+        train_fold(
+            data.manifest,
+            data.splits_file,
+            data.directory,
+            fold=0,
+            settings=replace(FAST, epochs=1),
+            model_settings=TINY,
+            preprocessing_settings=SETTINGS,
+            device=CPU,
+            output_dir=tmp_path / "run",
+            canvas=CANVAS,
+            init_from=pretrained,
+        )
+    assert f"starting from the weights of {pretrained}" in caplog.text
+    metadata = load_checkpoint(tmp_path / "run" / LAST_FILE).metadata
+    assert metadata["init_from"] == str(pretrained)
+    # A resume must start from the same weights.
+    with pytest.raises(ValueError, match="init_from"):
+        train_fold(
+            data.manifest,
+            data.splits_file,
+            data.directory,
+            fold=0,
+            settings=replace(FAST, epochs=2),
+            model_settings=TINY,
+            preprocessing_settings=SETTINGS,
+            device=CPU,
+            output_dir=tmp_path / "run",
+            canvas=CANVAS,
+            resume=True,
+        )

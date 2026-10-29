@@ -644,6 +644,25 @@ def _training_canvas(
     return rows, cols
 
 
+def load_weights(model: nn.Module, path: Path, model_settings: ModelSettings) -> None:
+    """Load the weights of the checkpoint at ``path`` into ``model``.
+
+    Raises ValueError if the checkpoint has another architecture or encoder than
+    ``model_settings``. Its preprocessing may differ: a model pretrained on one
+    dataset is trained further on another.
+    """
+    checkpoint = load_checkpoint(path)
+    saved = checkpoint.model_settings
+    wanted = (model_settings.architecture, model_settings.encoder)
+    if (saved.architecture, saved.encoder) != wanted:
+        raise ValueError(
+            f"{path.name} is a {saved.architecture} with a {saved.encoder} encoder, "
+            f"not a {wanted[0]} with a {wanted[1]} encoder"
+        )
+    model.load_state_dict(checkpoint.model_state)
+    logger.info("starting from the weights of %s", path)
+
+
 def train_fold(
     manifest: Manifest,
     splits_file: SplitsFile,
@@ -659,8 +678,14 @@ def train_fold(
     resume: bool = False,
     time_limit_minutes: float | None = None,
     inference: Inference | None = None,
+    init_from: Path | None = None,
 ) -> TrainingResult:
     """Train on every fold but ``fold`` of the splits and validate on ``fold``.
+
+    ``init_from`` starts from the weights of another checkpoint, for example a model
+    pretrained on another dataset, instead of those of ``model_settings``; its
+    architecture and encoder must be those of ``model_settings``. The path is stored
+    in the checkpoints, so a run is resumed only with the same one.
 
     ``device`` defaults to ``resolve_device()``. ``resume`` and
     ``time_limit_minutes`` are those of ``fit``. Validation predicts in sliding
@@ -692,6 +717,8 @@ def train_fold(
     )
     torch.manual_seed(settings.seed)
     model = build_model(model_settings)
+    if init_from is not None:
+        load_weights(model, init_from, model_settings)
     train_loader = training_loader(
         train_data,
         manifest,
@@ -728,6 +755,7 @@ def train_fold(
             "augmentation": json.dumps(asdict(augmentation_settings)),
             "inference": inference,
             "window": list(window),
+            "init_from": str(init_from) if init_from is not None else None,
         },
         resume=resume,
         time_limit_minutes=time_limit_minutes,

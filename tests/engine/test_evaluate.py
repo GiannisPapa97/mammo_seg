@@ -21,7 +21,11 @@ from mammo_seg.data.preprocessing import (
     PreprocessParams,
 )
 from mammo_seg.data.schema import Manifest
-from mammo_seg.data.splits import SplitsFile, create_splits_file
+from mammo_seg.data.splits import (
+    SplitsFile,
+    create_splits_file,
+    manifest_fingerprint,
+)
 from mammo_seg.engine.bootstrap import bootstrap
 from mammo_seg.engine.checkpoint import save_checkpoint
 from mammo_seg.engine.evaluate import (
@@ -154,6 +158,16 @@ def match(
 ) -> tuple[tuple[MassResult, ...], tuple[FalseRegion, ...]]:
     """``match_lesions`` with the prediction as its own probability map."""
     return match_lesions(predicted, truth, pixel_area_mm2, predicted.astype(np.float32))
+
+
+def test_without_a_pixel_area_the_regions_have_no_area() -> None:
+    other = square(slice(10, 14), slice(10, 14))
+    predicted = MASS | other
+    (mass,), (false,) = match_lesions(
+        predicted, MASS, None, predicted.astype(np.float32)
+    )
+    assert mass.found and mass.area_mm2 is None
+    assert false.area_mm2 is None
 
 
 def test_a_mass_is_found_by_a_region_that_overlaps_it_enough() -> None:
@@ -450,19 +464,44 @@ def manifest(tmp_path: Path) -> Manifest:
     return manifest
 
 
-def test_the_infos_need_the_pixel_size_of_every_image(
+def unknown_size(manifest: Manifest) -> Manifest:
+    """The manifest with no pixel size, as for CBIS-DDSM."""
+    images = tuple(replace(image, pixel_size_mm=None) for image in manifest.images)
+    return replace(manifest, images=images)
+
+
+def test_an_image_of_unknown_pixel_size_has_no_pixel_area(
     tmp_path: Path, manifest: Manifest
 ) -> None:
     record = read_record(tmp_path / "preprocessed" / RECORD_FILE)
-    first, *rest = manifest.images
-    unknown = Manifest(
-        version=2,
-        dataset="inbreast",
-        images=(replace(first, pixel_size_mm=None), *rest),
+    first = manifest.images[0].file_id
+    (info,) = image_infos(record, unknown_size(manifest), [first]).values()
+    assert info.pixel_area_mm2 is None
+    (known,) = image_infos(record, manifest, [first]).values()
+    assert known.pixel_area_mm2 is not None and known.pixel_area_mm2 > 0
+
+
+def test_without_a_pixel_area_only_a_minimum_size_of_0_works() -> None:
+    assert PostProcessing(0.5, 0).min_pixels(None) == 0
+    with pytest.raises(ValueError, match="--min-areas-mm2 0"):
+        PostProcessing(0.5, 5).min_pixels(None)
+
+
+def test_a_dataset_of_unknown_pixel_size_is_scored_without_areas(
+    tmp_path: Path, manifest: Manifest
+) -> None:
+    unknown = unknown_size(manifest)
+    splits = create_splits_file(manifest, 2)
+    splits = replace(splits, manifest_fingerprint=manifest_fingerprint(unknown))
+    with pytest.raises(ValueError, match="needs the pixel size"):
+        evaluate(tmp_path, unknown, splits)
+    evaluation = evaluate(
+        tmp_path, unknown, splits, settings=settings_grid((0.5,), (0,))
     )
-    with pytest.raises(ValueError, match="the pixel size is unknown"):
-        image_infos(record, unknown, [first.file_id])
-    assert image_infos(record, unknown, [rest[0].file_id])  # the others are fine
+    masses = [m for image in evaluation.images for m in image.results[0].masses]
+    assert masses and all(m.area_mm2 is None for m in masses)
+    groups = evaluation.pooled.settings[0].subgroups.masses
+    assert groups["small"].masses == groups["large"].masses == 0
 
 
 def test_a_model_is_scored_under_every_setting_and_against_predicting_nothing(
