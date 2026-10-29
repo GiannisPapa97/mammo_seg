@@ -157,6 +157,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="decoupled weight decay of AdamW; 0 is plain Adam",
     )
     training.add_argument(
+        "--freeze-encoder-epochs",
+        type=int,
+        default=0,
+        help="freeze the encoder for this many epochs at the start, so only the "
+        "decoder learns, then train every layer",
+    )
+    training.add_argument(
         "--positive-fraction",
         type=_fraction_or_none,
         default=0.5,
@@ -426,6 +433,7 @@ def _train(args: argparse.Namespace) -> int:
             patience=args.patience or None,
             seed=args.seed,
             num_workers=args.num_workers,
+            freeze_encoder_epochs=args.freeze_encoder_epochs,
         )
         model_settings = ModelSettings(
             architecture=args.architecture,

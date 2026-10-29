@@ -121,6 +121,9 @@ class TrainingSettings:
     patience: Annotated[int, Field(ge=1)] | None = 15
     seed: Annotated[int, Field(ge=0)] = 0
     num_workers: Annotated[int, Field(ge=0)] = 0
+    # The encoder is frozen for this many epochs at the start: only the decoder
+    # learns, then everything does. 0 trains every layer from the start.
+    freeze_encoder_epochs: Annotated[int, Field(ge=0)] = 0
 
     @field_validator("selection_metric")
     @classmethod
@@ -138,6 +141,15 @@ class TrainingSettings:
             raise ValueError(
                 f"the batch size is {self.batch_size} but the composition "
                 f"{self.composition} has {self.composition.size} patches"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _frozen_within_the_epochs(self) -> Self:
+        if self.freeze_encoder_epochs > self.epochs:
+            raise ValueError(
+                f"the encoder cannot be frozen for {self.freeze_encoder_epochs} of "
+                f"{self.epochs} epochs"
             )
         return self
 
@@ -169,6 +181,7 @@ class EpochRecord:
     # The training loss on the validation images (see ``validate``); None in the
     # history of a run from before it was recorded.
     validation_loss: float | None = None
+    encoder_frozen: bool = False  # only the decoder learned in this epoch
 
 
 # Settings that may differ between the sessions of one run: they do not change what
@@ -240,6 +253,20 @@ def peak_memory_gb(device: torch.device) -> float | None:
     return torch.cuda.max_memory_reserved(device) / 2**30
 
 
+def encoder_of(model: nn.Module) -> nn.Module:
+    """The encoder of a segmentation model; ValueError if it has none."""
+    encoder = getattr(model, "encoder", None)
+    if not isinstance(encoder, nn.Module):
+        raise ValueError(f"{type(model).__name__} has no encoder to freeze")
+    return encoder
+
+
+def set_encoder_frozen(model: nn.Module, frozen: bool) -> None:
+    """Freeze or unfreeze the weights of the encoder of ``model``."""
+    for parameter in encoder_of(model).parameters():
+        parameter.requires_grad_(not frozen)
+
+
 def train_one_epoch(
     model: nn.Module,
     loader: DataLoader[Sample],
@@ -248,14 +275,19 @@ def train_one_epoch(
     scaler: torch.amp.GradScaler,
     device: torch.device,
     amp: bool,
+    encoder_frozen: bool = False,
 ) -> float:
     """One pass over the training loader; returns the mean loss per batch.
 
     The loss counts every pixel of a sample, the padding included, as the mask says
-    (background there). Raises ValueError if the loader gives no batch (fewer images
-    than a batch).
+    (background there). With ``encoder_frozen``, the encoder gets no gradients and
+    stays in evaluation mode, so its batch normalization keeps the statistics it
+    has. Raises ValueError if the loader gives no batch (fewer images than a batch).
     """
     model.train()
+    if encoder_frozen:
+        set_encoder_frozen(model, True)
+        encoder_of(model).eval()
     total, batches = 0.0, 0
     for batch in loader:
         images, masks, _ = _to_device(batch, device)
@@ -339,6 +371,7 @@ def describe(record: EpochRecord, selection_metric: str) -> str:
         f"sensitivity {positives.sensitivity:.4f}), "
         f"false alarms {record.validation.without_mass.false_alarm_rate:.3f}, "
         f"{selection_metric} {record.selection_value:.4f}, {record.seconds:.0f} s"
+        + (", encoder frozen" if record.encoder_frozen else "")
         + (
             f", peak GPU memory {record.peak_gpu_memory_gb:.1f} GB"
             if record.peak_gpu_memory_gb is not None
@@ -576,9 +609,14 @@ def fit(
         if train_loader.generator is not None:
             train_loader.generator.manual_seed(seed)
         learning_rate = optimizer.param_groups[0]["lr"]
+        frozen = epoch <= settings.freeze_encoder_epochs
+        if settings.freeze_encoder_epochs:
+            set_encoder_frozen(model, frozen)
+            if epoch == settings.freeze_encoder_epochs + 1:
+                logger.info("unfreezing the encoder from epoch %d", epoch)
         reset_peak_memory(device)
         train_loss = train_one_epoch(
-            model, train_loader, loss_function, optimizer, scaler, device, amp
+            model, train_loader, loss_function, optimizer, scaler, device, amp, frozen
         )
         scheduler.step()
         summary, validation_loss = validate(
@@ -594,6 +632,7 @@ def fit(
             selection_value=value,
             peak_gpu_memory_gb=peak_memory_gb(device),
             validation_loss=validation_loss,
+            encoder_frozen=frozen,
         )
         slowest = max(slowest, record.seconds)
         progress.history.append(record)
