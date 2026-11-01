@@ -170,3 +170,112 @@ def test_the_loss_from_probabilities_checks_its_inputs() -> None:
         DiceBCELoss().from_probabilities(
             torch.zeros(1, 1, 2, 2), torch.zeros(1, 1, 2, 2), ~ones(1, 1, 2, 2)
         )
+
+
+# --- focal Tversky ---
+
+TVERSKY = {"alpha": 0.7, "beta": 0.3, "gamma": 0.75}
+
+
+def soft_dice_loss(probabilities: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+    """The Dice part as it was written before the Tversky settings."""
+    overlap = (probabilities * masks).flatten(1).sum(1)
+    total = probabilities.flatten(1).sum(1) + masks.flatten(1).sum(1)
+    return (1 - (2 * overlap + 1) / (total + 1)).mean()
+
+
+def random_batch() -> tuple[torch.Tensor, torch.Tensor]:
+    torch.manual_seed(0)
+    logits = torch.randn(3, 1, 8, 8) * 4
+    masks = (torch.rand(3, 1, 8, 8) > 0.8).float()
+    return logits, masks
+
+
+def test_the_default_is_the_soft_dice_to_the_bit() -> None:
+    logits, masks = random_batch()
+    loss = DiceBCELoss(bce_weight=0)(logits, masks, ones(3, 1, 8, 8))
+    assert torch.equal(loss, soft_dice_loss(torch.sigmoid(logits), masks))
+
+
+def test_the_tversky_index_by_hand() -> None:
+    logits = torch.tensor([[[[0.0, 0.0, 0.0]]]])  # probability 0.5 everywhere
+    masks = torch.tensor([[[[1.0, 1.0, 0.0]]]])
+    # overlap 1, misses 2 - 1 = 1, false positives 1.5 - 1 = 0.5, smooth 1
+    index = (1 + 0.5) / (1 + 0.7 * 1 + 0.3 * 0.5 + 0.5)
+    loss = DiceBCELoss(bce_weight=0, alpha=0.7, beta=0.3)
+    assert loss(logits, masks, ones(1, 1, 1, 3)).item() == pytest.approx(1 - index)
+    focal = DiceBCELoss(bce_weight=0, **TVERSKY)
+    assert focal(logits, masks, ones(1, 1, 1, 3)).item() == pytest.approx(
+        (1 - index) ** 0.75
+    )
+
+
+def test_a_larger_alpha_costs_a_miss_more_and_a_false_positive_less() -> None:
+    masks = torch.zeros(1, 1, 1, 10)
+    masks[0, 0, 0, :4] = 1
+    missed = torch.where(masks.bool(), BIG, -BIG)
+    missed[0, 0, 0, 0] = -BIG  # one mass pixel missed
+    false_positive = torch.where(masks.bool(), BIG, -BIG)
+    false_positive[0, 0, 0, 9] = BIG  # one pixel too many
+    dice, tversky = (
+        DiceBCELoss(bce_weight=0),
+        DiceBCELoss(bce_weight=0, alpha=0.7, beta=0.3),
+    )
+    valid = ones(1, 1, 1, 10)
+    assert tversky(missed, masks, valid) > dice(missed, masks, valid)
+    assert tversky(false_positive, masks, valid) < dice(false_positive, masks, valid)
+
+
+def test_a_gamma_under_1_raises_the_loss_of_nearly_right_images_most() -> None:
+    logits, masks = random_batch()
+    valid = ones(1, 1, 8, 8)
+    plain = DiceBCELoss(bce_weight=0, alpha=0.7, beta=0.3)
+    focal = DiceBCELoss(bce_weight=0, **TVERSKY)
+    for image in range(3):
+        one = logits[image : image + 1], masks[image : image + 1]
+        region = plain(*one, valid).item()
+        assert focal(*one, valid).item() == pytest.approx(region**0.75)
+        assert focal(*one, valid).item() > region
+
+
+@pytest.mark.parametrize("has_mass", [True, False])
+def test_a_perfect_image_gets_a_finite_gradient_with_a_gamma_under_1(
+    has_mass: bool,
+) -> None:
+    masks = torch.zeros(1, 1, 3, 3)
+    if has_mass:
+        masks[0, 0, 1, 1] = 1
+    # Saturated in float32: the probabilities are exactly 0 and 1, so 1 - index is 0.
+    logits = torch.where(masks.bool(), 200.0, -200.0).requires_grad_()
+    loss = DiceBCELoss(bce_weight=0, **TVERSKY)(logits, masks, ones(1, 1, 3, 3))
+    loss.backward()
+    assert loss.item() == pytest.approx(0, abs=1e-4)
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
+
+def test_the_focal_tversky_loss_from_probabilities_is_the_loss_from_logits() -> None:
+    logits, masks = random_batch()
+    valid = torch.rand(3, 1, 8, 8) > 0.2
+    loss = DiceBCELoss(**TVERSKY)
+    assert loss.from_probabilities(
+        torch.sigmoid(logits), masks, valid
+    ).item() == pytest.approx(loss(logits, masks, valid).item(), rel=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"alpha": 0.0}, "alpha and beta"),
+        ({"beta": 1.5}, "alpha and beta"),
+        ({"gamma": 0.0}, "gamma must be positive"),
+    ],
+)
+def test_invalid_tversky_settings_are_rejected(
+    arguments: dict[str, float], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        DiceBCELoss(**arguments)
+
+
+def test_the_loss_shows_its_settings() -> None:
+    assert "alpha=0.7, beta=0.3, gamma=0.75" in repr(DiceBCELoss(**TVERSKY))
