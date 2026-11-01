@@ -8,8 +8,15 @@ from tests.data.preprocessed import CANVAS, SETTINGS, WIDTHS, write_preprocessed
 from torch.utils.data import DataLoader
 
 from mammo_seg.data.dataset import DEFAULT_CANVAS, MammogramDataset, canvas_of, pad_to
-from mammo_seg.data.preprocess_dataset import RECORD_FILE, read_record
-from mammo_seg.data.preprocessing import PreprocessingSettings
+from mammo_seg.data.preprocess_dataset import (
+    RECORD_FILE,
+    clahe_path,
+    image_path,
+    read_clahe,
+    read_image,
+    read_record,
+)
+from mammo_seg.data.preprocessing import PreprocessingSettings, normalize_intensity
 
 
 @pytest.fixture
@@ -118,6 +125,23 @@ def test_the_settings_decide_the_normalization(tmp_path: Path) -> None:
     write_preprocessed(tmp_path, per_image)
     image = dataset(tmp_path, settings=per_image)[0]["image"]
     assert (image[0, :, :30] == 1.0).float().mean() > 0.4
+
+
+def test_with_clahe_the_stored_clahe_image_is_a_second_channel(
+    tmp_path: Path,
+) -> None:
+    with_clahe = replace(SETTINGS, clahe=0.01)
+    write_preprocessed(tmp_path, with_clahe)
+    sample = dataset(tmp_path, settings=with_clahe)[0]
+    stored = read_clahe(clahe_path(tmp_path, "00000001"))
+    assert sample["image"].shape == (2, 64, 48)
+    normalized = normalize_intensity(
+        read_image(image_path(tmp_path, "00000001")), with_clahe
+    )
+    assert torch.equal(sample["image"][0, :, :30], torch.from_numpy(normalized))
+    assert torch.equal(sample["image"][1, :, :30], torch.from_numpy(stored))
+    assert (sample["image"][1, :, 30:] == 0).all()
+    assert sample["mask"].shape == sample["valid"].shape == (1, 64, 48)
 
 
 def test_a_transform_gets_the_unpadded_image_and_mask(directory: Path) -> None:

@@ -4,6 +4,8 @@ The chain is: read the image (DICOM, or JPEG for CBIS-DDSM), crop to the breast,
 rescale so the longer side has a fixed length, flip so every chest wall is on the
 left, and normalize the intensities. The same code runs for training (where the
 first steps are cached on disk) and for inference, so both see identical input.
+Optionally, a contrast-enhanced copy of the normalized image (``enhance_contrast``)
+becomes a second input channel.
 
 ``preprocess`` runs the first four steps on an image and ``preprocess_mask`` applies
 the same geometry to its mask (``preprocess_points`` to points, such as the
@@ -22,6 +24,7 @@ from PIL import Image
 from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from scipy import ndimage
+from skimage import exposure
 
 # The raw INbreast images are 12-bit values in a 16-bit container. The background
 # is close to 0 and breast tissue is far above it.
@@ -34,6 +37,7 @@ DEFAULT_MAX_INTENSITY = 4095  # the 12-bit range of the INbreast images
 DEFAULT_FILM_EDGE_COVERAGE = 0.8  # share of bright pixels in a row of a film edge
 KEPT_CLOSING = 2  # mask pixels: gaps in dim tissue closed when clearing the background
 IMAGE_SUFFIXES: Final = (".jpg", ".jpeg", ".png")  # read as images, the rest as DICOM
+CLAHE_TILES = 8  # the image is split into 8 x 8 tiles, scikit-image's default
 
 # Right breasts are flipped so the chest wall is always on the left, where it
 # already is in the left breasts (``orientation="laterality"``, INbreast).
@@ -326,6 +330,9 @@ class PreprocessingSettings:
     # Set the pixels outside the breast region, widened by this many mask pixels,
     # to 0 before cropping, which removes labels and markers; None keeps them.
     clear_background: Annotated[int, Field(ge=0)] | None = None
+    # The clip limit of CLAHE (``enhance_contrast``) for a second input channel,
+    # in scikit-image's convention (0.01 is its default); None is one channel.
+    clahe: Annotated[float, Field(gt=0, lt=1)] | None = None
 
 
 @dataclass(frozen=True, config=_CONFIG)
@@ -571,3 +578,38 @@ def normalize_intensity(
         pixels.astype(np.float32) / high, 0.0, 1.0
     )
     return scaled
+
+
+def enhance_contrast(
+    image: npt.NDArray[np.floating[Any]], clip_limit: float
+) -> npt.NDArray[np.float32]:
+    """A normalized image (0..1) after CLAHE: contrast-limited adaptive histogram
+    equalization, on ``CLAHE_TILES`` x ``CLAHE_TILES`` tiles.
+
+    Each tile's histogram is equalized, with the peaks clipped at ``clip_limit`` (a
+    share of the tile's pixels, scikit-image's convention), and the mappings of
+    neighbouring tiles are blended, so the contrast is raised within each part of
+    the breast rather than over the whole image. Each image is enhanced on its own,
+    so nothing is learned from other images. The background (0) is set back to 0, as the
+    equalization lifts it.
+
+    Raises ValueError for an image that is not 2-D.
+    """
+    if image.ndim != 2:
+        raise ValueError(f"expected a 2-D image, got {image.ndim} dimensions")
+    kernel = tuple(max(side // CLAHE_TILES, 1) for side in image.shape)
+    enhanced = exposure.equalize_adapthist(
+        np.clip(image, 0.0, 1.0), kernel_size=kernel, clip_limit=clip_limit
+    )
+    result: npt.NDArray[np.float32] = np.where(image > 0, enhanced, 0.0).astype(
+        np.float32
+    )
+    return result
+
+
+def input_channels(
+    settings: PreprocessingSettings = PreprocessingSettings(),  # noqa: B008
+) -> int:
+    """The channels of the model input: the image, and its CLAHE with
+    ``settings.clahe``."""
+    return 1 if settings.clahe is None else 2

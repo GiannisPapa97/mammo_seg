@@ -5,6 +5,9 @@ flip, see ``preprocessing.py``). Training reads these files instead of decoding
 the raw images on every epoch; inference runs the same ``preprocess`` function on
 the incoming image, so both see identical input. The intensity normalization is
 not applied here: the images keep their values and are normalized when loaded.
+With ``--clahe``, the normalized image after CLAHE (``enhance_contrast``), the
+second input channel, is stored too: it takes about 0.06 s per image, too long to
+repeat every time an image is loaded for training.
 
 Each dataset has its settings (``DATASET_SETTINGS``). CBIS-DDSM is scanned film
 in 8-bit JPEGs: its values stay 0 to 255 (``max_intensity`` 255), its background
@@ -16,6 +19,8 @@ Output, in ``data/processed/<dataset>/preprocessed/`` by default:
 
 - ``images/<file_id>.png``: the preprocessed image, 16-bit (0 to 255 for CBIS-DDSM)
 - ``masks/<file_id>.png``: its mass mask, 8-bit with the values 0 and 255
+- ``clahe/<file_id>.png``: with ``--clahe``, the image after CLAHE, 16-bit, 0 to
+  65535 for 0 to 1
 - ``preprocessing.json``: the settings and, for every image, what was done to it
   (crop box, size, flip), which maps a prediction back onto the original image
 
@@ -29,9 +34,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass as std_dataclass
 from dataclasses import replace
 from pathlib import Path
-from typing import Final, Literal
+from typing import Any, Final, Literal
 
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 from pydantic import ConfigDict, TypeAdapter
 from pydantic.dataclasses import dataclass
@@ -52,8 +58,10 @@ from mammo_seg.data.preprocessing import (
     Pixels,
     PreprocessingSettings,
     PreprocessParams,
+    enhance_contrast,
     find_breast,
     kept_area,
+    normalize_intensity,
     preprocess,
     preprocess_mask,
     read_pixels,
@@ -83,6 +91,9 @@ DATASET_SETTINGS: Final[dict[Dataset, PreprocessingSettings]] = {
         clear_background=6,
     ),
 }
+
+# A CLAHE image (0..1) is stored as 16-bit integers.
+CLAHE_SCALE: Final = np.iinfo(np.uint16).max
 
 # A mask averaged down to the new size keeps its area, up to the pixels on its edge:
 # up to 5% of the expected area plus half a pixel along the edge. On the INbreast
@@ -128,6 +139,22 @@ def image_path(output_dir: Path, file_id: str) -> Path:
 
 def processed_mask_path(output_dir: Path, file_id: str) -> Path:
     return output_dir / "masks" / f"{file_id}.png"
+
+
+def clahe_path(output_dir: Path, file_id: str) -> Path:
+    return output_dir / "clahe" / f"{file_id}.png"
+
+
+def write_clahe(enhanced: npt.NDArray[np.floating[Any]], path: Path) -> None:
+    """Write a CLAHE image (0..1) as a 16-bit PNG."""
+    scaled = np.rint(np.clip(enhanced, 0.0, 1.0) * CLAHE_SCALE).astype(np.uint16)
+    write_image(scaled, path)
+
+
+def read_clahe(path: Path) -> npt.NDArray[np.float32]:
+    """Read a CLAHE image written by ``write_clahe`` as float32 in 0..1."""
+    scaled: npt.NDArray[np.float32] = read_image(path).astype(np.float32)
+    return scaled / np.float32(CLAHE_SCALE)
 
 
 def write_image(pixels: Pixels, path: Path) -> None:
@@ -245,6 +272,11 @@ def preprocess_dataset(
             continue
         write_image(result, image_path(output_dir, image.file_id))
         write_mask(rescaled, processed_mask_path(output_dir, image.file_id))
+        if settings.clahe is not None:
+            enhanced = enhance_contrast(
+                normalize_intensity(result, settings), settings.clahe
+            )
+            write_clahe(enhanced, clahe_path(output_dir, image.file_id))
         params_of[image.file_id] = params
         with_masks += int(rescaled.any())
         short_sides.append(min(result.shape))
@@ -291,6 +323,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_SIZE,
         help="length of the longer side of the results, in pixels",
     )
+    parser.add_argument(
+        "--clahe",
+        type=float,
+        metavar="CLIP_LIMIT",
+        help="also store each image after CLAHE with this clip limit, for a second "
+        "input channel (0.01 is a common choice); default: one channel",
+    )
     args = parser.parse_args(argv)
     dataset: Dataset = args.dataset
     processed = PROCESSED_DIRS[dataset]
@@ -298,7 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     started = time.time()
     try:
-        settings = replace(DATASET_SETTINGS[dataset], size=args.size)
+        settings = replace(DATASET_SETTINGS[dataset], size=args.size, clahe=args.clahe)
         summary = preprocess_dataset(
             read_manifest(args.manifest or processed / "manifest.json"),
             args.dataset_dir or RAW_DIRS[dataset],
@@ -314,6 +353,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{time.time() - started:.0f}s: longer side {settings.size}, shorter side "
         f"{summary.shortest_side[0]} to {summary.shortest_side[1]}, "
         f"{summary.images_with_masks} with a mass"
+        + (f", CLAHE with a clip limit of {args.clahe}" if args.clahe else "")
     )
     return 0
 

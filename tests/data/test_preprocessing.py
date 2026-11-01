@@ -23,8 +23,10 @@ from mammo_seg.data.preprocessing import (
     bright_mask,
     chest_wall_on_right,
     clear_edges,
+    enhance_contrast,
     film_edges,
     find_breast,
+    input_channels,
     kept_area,
     largest_region,
     normalize_intensity,
@@ -543,6 +545,7 @@ def test_the_default_settings_are_the_documented_ones() -> None:
     assert (settings.border, settings.orientation) == (0, "laterality")
     assert (settings.film_edge_depth, settings.film_edge_coverage) == (0.0, 0.8)
     assert settings.clear_background is None
+    assert settings.clahe is None
 
 
 def test_settings_written_before_border_and_orientation_still_read() -> None:
@@ -571,6 +574,8 @@ def test_settings_written_before_border_and_orientation_still_read() -> None:
         {"film_edge_depth": 1.0},
         {"film_edge_coverage": 0},
         {"clear_background": -1},
+        {"clahe": 0},
+        {"clahe": 1.0},
     ],
 )
 def test_invalid_settings_are_rejected(changes: dict[str, float]) -> None:
@@ -955,3 +960,58 @@ def test_preprocessing_then_normalizing_gives_the_model_input() -> None:
     assert result.shape == image.shape
     assert result.dtype == np.float32
     assert 0.0 <= result.min() and result.max() == 1.0
+
+
+# --- contrast enhancement (CLAHE) ---
+
+
+def faint_mass_image() -> np.ndarray:
+    """A 256 x 192 normalized image: a breast of finely textured tissue on the left
+    128 columns, a faint brighter 32 x 32 square in it, background on the right."""
+    image = np.zeros((256, 192), dtype=np.float32)
+    rows, cols = np.mgrid[:256, :128]
+    image[:, :128] = 0.35 + 0.005 * np.sin(cols / 3.0) * np.cos(rows / 4.0)
+    image[96:128, 40:72] += 0.02
+    return image
+
+
+def mass_contrast(image: np.ndarray) -> float:
+    """The mean of the square of ``faint_mass_image`` minus that of the tissue in a
+    band of 16 pixels around it."""
+    ring = np.zeros(image.shape, dtype=bool)
+    ring[80:144, 24:88] = True
+    ring[96:128, 40:72] = False
+    return float(image[96:128, 40:72].mean() - image[ring].mean())
+
+
+def test_clahe_raises_the_contrast_of_a_faint_mass() -> None:
+    image = faint_mass_image()
+    assert mass_contrast(enhance_contrast(image, 0.01)) > 2 * mass_contrast(image) > 0
+
+
+def test_clahe_keeps_the_background_at_zero_and_the_tissue_in_0_to_1() -> None:
+    enhanced = enhance_contrast(faint_mass_image(), 0.01)
+    assert enhanced.dtype == np.float32
+    assert (enhanced[:, 128:] == 0).all()
+    assert (enhanced[:, :128] > 0).all() and enhanced.max() <= 1
+
+
+def test_a_higher_clip_limit_gives_more_contrast() -> None:
+    image = faint_mass_image()
+    low, high = enhance_contrast(image, 0.01), enhance_contrast(image, 0.05)
+    assert mass_contrast(high) > mass_contrast(low)
+
+
+def test_clahe_of_an_image_depends_only_on_that_image() -> None:
+    image = faint_mass_image()
+    assert np.array_equal(enhance_contrast(image, 0.01), enhance_contrast(image, 0.01))
+
+
+def test_clahe_needs_a_2d_image() -> None:
+    with pytest.raises(ValueError, match="2-D"):
+        enhance_contrast(np.zeros((2, 8, 8), dtype=np.float32), 0.01)
+
+
+def test_clahe_adds_a_second_input_channel() -> None:
+    assert input_channels() == 1
+    assert input_channels(PreprocessingSettings(clahe=0.01)) == 2

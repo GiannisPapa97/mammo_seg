@@ -18,12 +18,15 @@ from mammo_seg.data.preprocess_dataset import (
     check_mask_kept,
     check_mass_not_cleared,
     check_settings,
+    clahe_path,
     image_path,
     main,
     preprocess_dataset,
     processed_mask_path,
+    read_clahe,
     read_image,
     read_record,
+    write_clahe,
     write_image,
     write_record,
 )
@@ -31,6 +34,8 @@ from mammo_seg.data.preprocessing import (
     BoundingBox,
     PreprocessingSettings,
     PreprocessParams,
+    enhance_contrast,
+    normalize_intensity,
     preprocess,
     preprocess_mask,
     read_pixels,
@@ -353,6 +358,26 @@ def test_main_preprocesses_the_dataset_and_prints_a_summary(
     assert read_record(dataset.output / RECORD_FILE).settings.size == 80
 
 
+def test_main_stores_clahe_images_with_a_clip_limit(
+    dataset: Dataset, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    write_manifest(dataset.manifest, manifest_path)
+    code = main(
+        [
+            "--manifest", str(manifest_path),
+            "--dataset-dir", str(dataset.dicoms),
+            "--masks-dir", str(dataset.masks),
+            "--output-dir", str(dataset.output),
+            "--clahe", "0.02",
+        ]
+    )  # fmt: skip
+    assert code == 0
+    assert "CLAHE with a clip limit of 0.02" in capsys.readouterr().out
+    assert read_record(dataset.output / RECORD_FILE).settings.clahe == 0.02
+    assert all(clahe_path(dataset.output, file_id).exists() for file_id in IDS)
+
+
 def test_main_reports_problems(
     dataset: Dataset, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -378,6 +403,11 @@ def test_main_reports_a_missing_manifest_and_an_invalid_size(
     assert "error:" in capsys.readouterr().err
     assert main(["--manifest", str(tmp_path / "m.json"), "--size", "0"]) == 1
     assert "error:" in capsys.readouterr().err
+    for clip_limit in ("0", "1.5"):
+        assert (
+            main(["--manifest", str(tmp_path / "m.json"), "--clahe", clip_limit]) == 1
+        )
+        assert "clahe" in capsys.readouterr().err
 
 
 # --- checking that a mask survives the rescaling ---
@@ -549,3 +579,34 @@ def test_the_dataset_reports_a_mass_the_clearing_would_erase(dataset: Dataset) -
     settings = replace(SETTINGS, clear_background=1, margin=1.0)
     with pytest.raises(PreprocessingError, match=f"image {ID3}: clearing the"):
         run(dataset, settings)
+
+
+# --- CLAHE images ---
+
+
+def test_the_clahe_images_are_those_of_the_stored_images(dataset: Dataset) -> None:
+    settings = replace(SETTINGS, clahe=0.01)
+    run(dataset, settings)
+    for file_id in IDS:
+        normalized = normalize_intensity(
+            read_image(image_path(dataset.output, file_id)), settings
+        )
+        stored = read_clahe(clahe_path(dataset.output, file_id))
+        expected = enhance_contrast(normalized, 0.01)
+        assert stored.shape == normalized.shape
+        assert np.abs(stored - expected).max() <= 1 / 65535
+        assert (stored[normalized == 0] == 0).all()
+
+
+def test_no_clahe_images_are_stored_without_a_clip_limit(dataset: Dataset) -> None:
+    run(dataset)
+    assert not (dataset.output / "clahe").exists()
+
+
+def test_a_clahe_image_round_trips_to_16_bits(tmp_path: Path) -> None:
+    enhanced = np.linspace(0, 1, 40, dtype=np.float32).reshape(5, 8)
+    write_clahe(enhanced, tmp_path / "clahe" / "a.png")
+    read = read_clahe(tmp_path / "clahe" / "a.png")
+    assert read.dtype == np.float32
+    assert np.abs(read - enhanced).max() <= 0.5 / 65535 + 1e-7
+    assert clahe_path(tmp_path, ID1) == tmp_path / "clahe" / f"{ID1}.png"

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,22 @@ def test_every_architecture_maps_one_channel_to_one_channel(architecture: str) -
         output = model(torch.rand(2, 1, 64, 64))
     assert output.shape == (2, 1, 64, 64)
     assert output.dtype == torch.float32
+
+
+def test_a_model_of_two_input_channels_takes_the_image_and_its_clahe() -> None:
+    model = build_model(replace(SMALL, in_channels=2)).eval()
+    with torch.no_grad():
+        output = model(torch.rand(2, 2, 64, 64))
+    assert output.shape == (2, 1, 64, 64)
+    with pytest.raises(RuntimeError):
+        model(torch.rand(1, 1, 64, 64))
+
+
+def test_the_input_channels_are_one_or_two() -> None:
+    assert ModelSettings().in_channels == 1
+    for channels in (0, 3):
+        with pytest.raises(ValidationError):
+            ModelSettings(in_channels=channels)
 
 
 def test_the_output_is_raw_logits() -> None:

@@ -70,7 +70,7 @@ from mammo_seg.data.dataset import (
 )
 from mammo_seg.data.folds import fold_ids
 from mammo_seg.data.loaders import BatchComposition, evaluation_loader, training_loader
-from mammo_seg.data.preprocessing import PreprocessingSettings
+from mammo_seg.data.preprocessing import PreprocessingSettings, input_channels
 from mammo_seg.data.schema import Manifest
 from mammo_seg.data.splits import SplitsFile
 from mammo_seg.device import resolve_device
@@ -686,9 +686,9 @@ def _training_canvas(
 def load_weights(model: nn.Module, path: Path, model_settings: ModelSettings) -> None:
     """Load the weights of the checkpoint at ``path`` into ``model``.
 
-    Raises ValueError if the checkpoint has another architecture or encoder than
-    ``model_settings``. Its preprocessing may differ: a model pretrained on one
-    dataset is trained further on another.
+    Raises ValueError if the checkpoint has another architecture, encoder or number
+    of input channels than ``model_settings``. Its preprocessing may otherwise
+    differ: a model pretrained on one dataset is trained further on another.
     """
     checkpoint = load_checkpoint(path)
     saved = checkpoint.model_settings
@@ -697,6 +697,12 @@ def load_weights(model: nn.Module, path: Path, model_settings: ModelSettings) ->
         raise ValueError(
             f"{path.name} is a {saved.architecture} with a {saved.encoder} encoder, "
             f"not a {wanted[0]} with a {wanted[1]} encoder"
+        )
+    if saved.in_channels != model_settings.in_channels:
+        raise ValueError(
+            f"{path.name} takes {saved.in_channels} input channels, not "
+            f"{model_settings.in_channels}: it was trained on data preprocessed "
+            "with or without CLAHE, unlike this data"
         )
     model.load_state_dict(checkpoint.model_state)
     logger.info("starting from the weights of %s", path)
@@ -723,8 +729,9 @@ def train_fold(
 
     ``init_from`` starts from the weights of another checkpoint, for example a model
     pretrained on another dataset, instead of those of ``model_settings``; its
-    architecture and encoder must be those of ``model_settings``. The path is stored
-    in the checkpoints, so a run is resumed only with the same one.
+    architecture, encoder and input channels must be those of ``model_settings``.
+    The path is stored in the checkpoints, so a run is resumed only with the same
+    one.
 
     ``device`` defaults to ``resolve_device()``. ``resume`` and
     ``time_limit_minutes`` are those of ``fit``. Validation predicts in sliding
@@ -732,9 +739,15 @@ def train_fold(
     otherwise, unless ``inference`` says otherwise; the choice and the window are
     stored in the checkpoints, and a run is not resumed with other ones. Raises
     ValueError for a fold outside the splits, splits made from another manifest,
-    preprocessed data made with other settings, a composition without crops, or a
-    checkpoint that cannot be resumed.
+    preprocessed data made with other settings, model settings whose input channels
+    are not those of the preprocessing (``input_channels``), a composition without
+    crops, or a checkpoint that cannot be resumed.
     """
+    if model_settings.in_channels != input_channels(preprocessing_settings):
+        raise ValueError(
+            f"the model takes {model_settings.in_channels} input channels, but the "
+            f"preprocessing gives {input_channels(preprocessing_settings)}"
+        )
     if settings.composition is not None and augmentation_settings.crop_size is None:
         raise ValueError(
             "batches with a composition are made of patches: set the crop size"

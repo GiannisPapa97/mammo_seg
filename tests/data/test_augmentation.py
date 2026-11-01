@@ -496,3 +496,50 @@ def test_the_padding_of_a_crop_of_a_small_image_is_not_valid(tmp_path: Path) -> 
     assert full["valid"].all()
     assert narrowest["valid"][0, :, :20].all()
     assert not narrowest["valid"][0, :, 20:].any()
+
+
+# --- two channels (the image and its CLAHE) ---
+
+
+def two_channel_breast_sample() -> tuple[torch.Tensor, torch.Tensor]:
+    """``breast_sample`` with a second channel: the same breast, brighter."""
+    image, mask = breast_sample()
+    second = (image * 2).clamp(max=1.0)
+    return torch.cat([image, second]), mask
+
+
+def test_two_channels_keep_their_shapes() -> None:
+    torch.manual_seed(0)
+    image, mask = Augmentation()(*two_channel_breast_sample())
+    assert image.shape == (2, 64, 48) and mask.shape == (1, 64, 48)
+    assert image.min() >= 0 and image.max() <= 1
+
+
+def test_both_channels_move_with_the_mask() -> None:
+    geometric_only = replace(NOTHING, rotation=30, scale=0.2, shift=0.2, elastic=3.0)
+    for seed in range(5):
+        torch.manual_seed(seed)
+        sample, _ = two_channel_breast_sample()
+        image, mask = Augmentation(geometric_only)(sample, breast_sample()[1])
+        first, second = image[0] > 0, image[1] > 0
+        assert torch.equal(first, second)
+        assert overlap(mask[0] > 0.5, image[0] > 0.6) > 0.8
+
+
+def test_the_background_stays_zero_in_both_channels() -> None:
+    strong = replace(NOTHING, brightness=0.5, contrast=0.5, gamma=0.5, noise=0.05)
+    breast = breast_sample()[0][0] > 0
+    for seed in range(10):
+        torch.manual_seed(seed)
+        image, _ = Augmentation(strong)(*two_channel_breast_sample())
+        assert (image[:, ~breast] == 0).all()
+        assert (image[:, breast] > 0).all()
+
+
+def test_each_channel_gets_its_own_brightness() -> None:
+    brightness_only = replace(NOTHING, brightness=0.5)
+    torch.manual_seed(0)
+    image, _ = Augmentation(brightness_only)(*two_channel_breast_sample())
+    original, _ = two_channel_breast_sample()
+    factors = image[:, 30, 2] / original[:, 30, 2]
+    assert not torch.isclose(factors[0], factors[1])

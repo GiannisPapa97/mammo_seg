@@ -1,5 +1,6 @@
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, get_args
 
@@ -367,6 +368,19 @@ def test_a_run_with_elastic_deformation_and_weight_decay_trains(
     metadata = load_checkpoint(project.output / "fold_0" / "last.pt").metadata
     assert json.loads(metadata["augmentation"])["elastic"] == 2.0
     assert json.loads(metadata["training_settings"])["weight_decay"] == 0.01
+
+
+def test_a_run_on_clahe_data_trains_and_evaluates_a_two_channel_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = make_project(tmp_path, replace(SETTINGS, clahe=0.01))
+    options = ["--epochs", "1", "--no-amp", *TINY]
+    for fold in ("0", "1"):
+        assert cli.main(project.train_args("--fold", fold, *options)) == 0
+    saved = load_checkpoint(project.output / "fold_0" / "last.pt")
+    assert saved.model_settings.in_channels == 2
+    assert cli.main(evaluate_args(project, "--folds", "0", "1")) == 0
+    assert "predicted in one pass" in capsys.readouterr().out
 
 
 def test_an_invalid_augmentation_is_an_error(

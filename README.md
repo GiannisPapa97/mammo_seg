@@ -82,6 +82,8 @@ Then preprocess the images once (crop to the breast, rescale to a longer side of
 uv run python -m mammo_seg.data.preprocess_dataset
 ```
 
+`--clahe 0.01` also stores each image after CLAHE (contrast enhancement), which training then reads as a second input channel; see [docs/data-pipeline.md](docs/data-pipeline.md#contrast-enhancement-clahe).
+
 The PyTorch dataset and loaders read these files; see [docs/data-pipeline.md](docs/data-pipeline.md) for the formats, the checks and how to load a fold.
 
 The installed `mammo-seg` command runs the same steps (`mammo-seg manifest`, `splits`, `masks`, `preprocess`) and training.

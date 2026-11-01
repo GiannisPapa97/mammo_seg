@@ -1,9 +1,11 @@
 """Building the segmentation network.
 
 Models come from ``segmentation_models_pytorch`` (smp): an architecture (U-Net,
-DeepLabV3+ and others) on top of a pretrained encoder. The input has one channel
-(smp sums the pretrained weights of the first layer over the colour channels) and
-the output is one channel of raw logits for the mass mask, ready for
+DeepLabV3+ and others) on top of a pretrained encoder. The input has one channel,
+the image (smp sums the pretrained weights of the first layer over the colour
+channels), or two, the image and its CLAHE (smp gives them the weights of the red
+and the green channel, scaled by 3/2, so the sum stays that of a grey image); the
+output is one channel of raw logits for the mass mask, ready for
 ``DiceBCELoss``; apply a sigmoid to get probabilities.
 
 Pretrained encoder weights are downloaded the first time a model is built. That
@@ -16,7 +18,7 @@ and CI use ``None`` and never download anything.
 from typing import Annotated, Literal
 
 import segmentation_models_pytorch as smp
-from pydantic import ConfigDict, StringConstraints
+from pydantic import ConfigDict, Field, StringConstraints
 from pydantic.dataclasses import dataclass
 from torch import nn
 
@@ -38,10 +40,13 @@ class ModelSettings:
     encoder: Annotated[str, StringConstraints(min_length=1)] = "resnet34"
     # "imagenet" downloads pretrained encoder weights; None starts from random ones.
     encoder_weights: Literal["imagenet"] | None = "imagenet"
+    # The channels of the input, ``input_channels`` of the preprocessing settings.
+    in_channels: Annotated[int, Field(ge=1, le=2)] = 1
 
 
 def build_model(settings: ModelSettings = ModelSettings()) -> nn.Module:  # noqa: B008
-    """A network mapping ``[B, 1, H, W]`` images to ``[B, 1, H, W]`` logits.
+    """A network mapping ``[B, C, H, W]`` images (C is ``settings.in_channels``) to
+    ``[B, 1, H, W]`` logits.
 
     Raises ValueError for an encoder smp does not know, and RuntimeError with a
     hint when the pretrained weights cannot be downloaded.
@@ -51,7 +56,7 @@ def build_model(settings: ModelSettings = ModelSettings()) -> nn.Module:  # noqa
         model: nn.Module = architecture(
             encoder_name=settings.encoder,
             encoder_weights=settings.encoder_weights,
-            in_channels=1,
+            in_channels=settings.in_channels,
             classes=1,
         )
     except (KeyError, ValueError) as error:

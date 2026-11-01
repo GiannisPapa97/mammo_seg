@@ -1187,6 +1187,55 @@ def test_weights_of_another_architecture_or_encoder_are_refused(
         load_weights(build_model(other), tmp_path / "pretrained.pt", other)
 
 
+def test_weights_of_another_number_of_input_channels_are_refused(
+    tmp_path: Path,
+) -> None:
+    saved_model(tmp_path / "pretrained.pt")
+    two = replace(TINY, in_channels=2)
+    with pytest.raises(ValueError, match="takes 1 input channels, not 2"):
+        load_weights(build_model(two), tmp_path / "pretrained.pt", two)
+
+
+def test_a_fold_trains_on_the_image_and_its_clahe(tmp_path: Path) -> None:
+    manifest = make_manifest(4, 4, per_patient=2)
+    with_clahe = replace(SETTINGS, clahe=0.01)
+    write_preprocessed_for(tmp_path / "preprocessed", with_clahe, manifest)
+    result = train_fold(
+        manifest,
+        create_splits_file(manifest, 2),
+        tmp_path / "preprocessed",
+        fold=0,
+        settings=replace(FAST, epochs=1),
+        model_settings=replace(TINY, in_channels=2),
+        preprocessing_settings=with_clahe,
+        device=CPU,
+        output_dir=tmp_path / "run",
+        canvas=CANVAS,
+    )
+    assert len(result.history) == 1
+    saved = load_checkpoint(tmp_path / "run" / LAST_FILE)
+    assert saved.model_settings.in_channels == 2
+    assert saved.preprocessing_settings.clahe == 0.01
+
+
+def test_a_model_must_take_the_channels_of_the_preprocessing(
+    data: Data, tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match="takes 2 input channels, but the "):
+        train_fold(
+            data.manifest,
+            data.splits_file,
+            data.directory,
+            fold=0,
+            settings=replace(FAST, epochs=1),
+            model_settings=replace(TINY, in_channels=2),
+            preprocessing_settings=SETTINGS,
+            device=CPU,
+            output_dir=tmp_path / "run",
+            canvas=CANVAS,
+        )
+
+
 def test_a_fold_starts_from_the_checkpoint_and_records_it(
     data: Data, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

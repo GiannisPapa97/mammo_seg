@@ -1,11 +1,12 @@
 """The PyTorch dataset of preprocessed mammograms and their mass masks.
 
 A sample is read from the files written by ``preprocess_dataset``: the 16-bit
-image is normalized to 0..1, an optional transform (the training augmentation) is
-applied to image and mask together, and both are padded on the right and at the
-bottom to a common canvas so samples can be stacked into batches. The chest wall
-is on the left in every preprocessed image, so the padding only adds background
-next to the breast.
+image is normalized to 0..1 and, when the data was preprocessed with CLAHE, its
+stored CLAHE image is added as a second channel; an optional transform (the
+training augmentation) is applied to image and mask together, and both are padded
+on the right and at the bottom to a common canvas so samples can be stacked into
+batches. The chest wall is on the left in every preprocessed image, so the padding
+only adds background next to the breast.
 
 Every sample also carries ``valid``, which is true on the pixels of the image and
 false on the padding, so losses and metrics can leave the padding out. A crop of an
@@ -16,6 +17,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TypedDict
 
+import numpy as np
 import torch
 from torch.nn import functional
 from torch.utils.data import Dataset
@@ -26,8 +28,10 @@ from mammo_seg.data.preprocess_dataset import (
     RECORD_FILE,
     PreprocessingRecord,
     check_settings,
+    clahe_path,
     image_path,
     processed_mask_path,
+    read_clahe,
     read_image,
     read_record,
 )
@@ -46,7 +50,7 @@ Transform = Callable[..., tuple[torch.Tensor, torch.Tensor]]
 
 
 class Sample(TypedDict):
-    image: torch.Tensor  # float32, [1, H, W], 0..1, 0 on the padding
+    image: torch.Tensor  # float32, [C, H, W], 0..1, 0 on the padding
     mask: torch.Tensor  # float32, [1, H, W], 1 on a mass
     valid: torch.Tensor  # bool, [1, H, W], false on the padding
     file_id: str
@@ -114,8 +118,10 @@ class MammogramDataset(Dataset[Sample]):
         index, kind = item if isinstance(item, tuple) else (item, None)
         file_id = self.file_ids[index]
         pixels = read_image(image_path(self.directory, file_id))
-        normalized = normalize_intensity(pixels, self.settings)
-        image = torch.from_numpy(normalized).unsqueeze(0)
+        channels = [normalize_intensity(pixels, self.settings)]
+        if self.settings.clahe is not None:
+            channels.append(read_clahe(clahe_path(self.directory, file_id)))
+        image = torch.from_numpy(np.stack(channels))
         mask_array = read_mask(processed_mask_path(self.directory, file_id))
         mask = torch.from_numpy(mask_array).unsqueeze(0).float()
         if kind is not None:
@@ -126,7 +132,7 @@ class MammogramDataset(Dataset[Sample]):
             image, mask = self.transform(image, mask, kind)
         elif self.transform is not None:
             image, mask = self.transform(image, mask)
-        valid = torch.ones_like(image, dtype=torch.bool)
+        valid = torch.ones_like(mask, dtype=torch.bool)
         return Sample(
             image=pad_to(image, self.canvas),
             mask=pad_to(mask, self.canvas),
