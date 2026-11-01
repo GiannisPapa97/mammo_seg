@@ -61,6 +61,7 @@ def test_the_defaults_are_the_agreed_training_settings() -> None:
     assert args.device is None and not args.resume and args.max_minutes is None
     assert args.output_dir == Path("runs")
     assert args.freeze_encoder_epochs == 0
+    assert (args.tversky_alpha, args.tversky_beta, args.focal_gamma) == (0.5, 0.5, 1.0)
 
 
 def test_training_on_whole_images_is_the_default() -> None:
@@ -368,6 +369,44 @@ def test_a_run_with_elastic_deformation_and_weight_decay_trains(
     metadata = load_checkpoint(project.output / "fold_0" / "last.pt").metadata
     assert json.loads(metadata["augmentation"])["elastic"] == 2.0
     assert json.loads(metadata["training_settings"])["weight_decay"] == 0.01
+
+
+def test_the_loss_options_reach_the_training(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def fake(*args: Any, **kwargs: Any) -> TrainingResult:
+        calls.append(args)
+        return result()
+
+    monkeypatch.setattr(train_module, "train_fold", fake)
+    options = ["--tversky-alpha", "0.7", "--tversky-beta", "0.3"]
+    options += ["--focal-gamma", "0.75", *TINY]
+    assert cli.main(project.train_args(*options)) == 0
+    settings = calls[0][4]
+    assert (settings.tversky_alpha, settings.tversky_beta) == (0.7, 0.3)
+    assert settings.focal_gamma == 0.75
+
+
+def test_an_invalid_loss_option_is_an_error(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(project.train_args("--tversky-alpha", "0", *TINY)) == 1
+    assert "tversky_alpha" in capsys.readouterr().err
+
+
+def test_a_run_with_the_focal_tversky_loss_trains(
+    project: Project, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = ["--tversky-alpha", "0.7", "--tversky-beta", "0.3"]
+    options += ["--focal-gamma", "0.75", "--epochs", "1", "--no-amp", *TINY]
+    assert cli.main(project.train_args(*options)) == 0
+    assert "Training ended after 1 epochs (finished)" in capsys.readouterr().out
+    metadata = load_checkpoint(project.output / "fold_0" / "last.pt").metadata
+    saved = json.loads(metadata["training_settings"])
+    assert (saved["tversky_alpha"], saved["tversky_beta"]) == (0.7, 0.3)
+    assert saved["focal_gamma"] == 0.75
 
 
 def test_a_run_on_clahe_data_trains_and_evaluates_a_two_channel_model(

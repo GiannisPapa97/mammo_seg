@@ -6,7 +6,8 @@ a pass of validation:
 
 - training draws batches balanced between images with and without a mass, or, with
   a ``BatchComposition``, batches of a fixed make-up of patches
-  (``loaders.training_loader``) and minimizes ``DiceBCELoss`` with AdamW, with a
+  (``loaders.training_loader``) and minimizes ``DiceBCELoss`` (soft Dice plus
+  cross-entropy, or focal Tversky with the Tversky settings) with AdamW, with a
   learning rate that follows a cosine curve down to 0 over the epochs. AdamW is
   Adam with a decoupled weight decay, which shrinks every weight a little at each
   step; without it (the default) AdamW makes the same steps as Adam. The loss
@@ -124,6 +125,13 @@ class TrainingSettings:
     # The encoder is frozen for this many epochs at the start: only the decoder
     # learns, then everything does. 0 trains every layer from the start.
     freeze_encoder_epochs: Annotated[int, Field(ge=0)] = 0
+    # The region part of the loss (see ``losses.py``): the weight of the missed mass
+    # pixels and of the false positives in the Tversky index, and the exponent of
+    # 1 - index. 0.5, 0.5 and 1 give the soft Dice; Abraham & Khan use 0.7, 0.3
+    # and 0.75.
+    tversky_alpha: Annotated[float, Field(gt=0, le=1)] = 0.5
+    tversky_beta: Annotated[float, Field(gt=0, le=1)] = 0.5
+    focal_gamma: Annotated[float, Field(gt=0)] = 1.0
 
     @field_validator("selection_metric")
     @classmethod
@@ -549,7 +557,12 @@ def fit(
     metadata = metadata or {}
     model.to(device)
     amp = settings.amp and device.type == "cuda"
-    loss_function = DiceBCELoss()
+    loss_function = DiceBCELoss(
+        alpha=settings.tversky_alpha,
+        beta=settings.tversky_beta,
+        gamma=settings.focal_gamma,
+    )
+    logger.info("loss: %s", loss_function)
     optimizer = AdamW(
         model.parameters(),
         lr=settings.learning_rate,

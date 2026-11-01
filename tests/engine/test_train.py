@@ -115,6 +115,9 @@ def test_the_default_settings_are_the_agreed_ones() -> None:
     assert settings.learning_rate == 1e-4 and settings.positive_fraction == 0.5
     assert settings.amp and settings.selection_metric == "all_images.dice"
     assert settings.weight_decay == 0
+    # The soft Dice of all runs before the Tversky settings.
+    assert (settings.tversky_alpha, settings.tversky_beta) == (0.5, 0.5)
+    assert settings.focal_gamma == 1
 
 
 @pytest.mark.parametrize("name", SELECTION_METRICS)
@@ -138,6 +141,9 @@ def test_every_group_and_metric_can_be_selected(name: str) -> None:
         {"samples_per_epoch": 0},
         {"num_workers": -1},
         {"seed": -1},
+        {"tversky_alpha": 0.0},
+        {"tversky_beta": 1.5},
+        {"focal_gamma": 0.0},
         {"unknown": 1},
     ],
 )
@@ -497,6 +503,25 @@ def test_fit_runs_the_epochs_validates_and_writes_the_history(
     assert result.stop_reason == "finished"
 
 
+def test_fit_trains_with_the_loss_of_the_settings(
+    data: Data, caplog: pytest.LogCaptureFixture
+) -> None:
+    focal = replace(
+        FAST, epochs=1, tversky_alpha=0.7, tversky_beta=0.3, focal_gamma=0.75
+    )
+    with caplog.at_level(logging.INFO, logger="mammo_seg.engine.train"):
+        tversky = run_fit(data, focal)
+    assert any(
+        "loss: DiceBCELoss(" in m and "alpha=0.7, beta=0.3, gamma=0.75" in m
+        for m in caplog.messages
+    )
+    dice = run_fit(data, replace(FAST, epochs=1))
+    # The same draws and starting weights: only the loss differs.
+    assert tversky.history[0].train_loss != dice.history[0].train_loss
+    assert tversky.history[0].validation_loss != dice.history[0].validation_loss
+    assert math.isfinite(tversky.history[0].train_loss)
+
+
 def test_adamw_without_weight_decay_makes_the_steps_of_adam() -> None:
     # So runs without weight decay train exactly as those from before AdamW.
     torch.manual_seed(0)
@@ -808,6 +833,8 @@ def test_a_checkpoint_without_training_state_cannot_be_resumed(
         ({"metadata": {"fold": 1}}, "fold = 0, not 1"),
         ({"settings": replace(FAST, small_mass_fraction=0.5)}, "small_mass_fraction"),
         ({"settings": replace(FAST, weight_decay=0.01)}, "weight_decay: 0.0 -> 0.01"),
+        ({"settings": replace(FAST, tversky_alpha=0.7)}, "tversky_alpha: 0.5 -> 0.7"),
+        ({"settings": replace(FAST, focal_gamma=0.75)}, "focal_gamma: 1.0 -> 0.75"),
     ],
 )
 def test_a_run_is_only_resumed_with_the_settings_it_started_with(
@@ -819,7 +846,16 @@ def test_a_run_is_only_resumed_with_the_settings_it_started_with(
         run_fit(data, output_dir=tmp_path, resume=True, **options)
 
 
-@pytest.mark.parametrize("added_later", ["small_mass_fraction", "weight_decay"])
+@pytest.mark.parametrize(
+    "added_later",
+    [
+        "small_mass_fraction",
+        "weight_decay",
+        "tversky_alpha",
+        "tversky_beta",
+        "focal_gamma",
+    ],
+)
 def test_settings_saved_before_a_setting_was_added_still_load(added_later: str) -> None:
     adapter = TypeAdapter(TrainingSettings)
     saved = json.loads(adapter.dump_json(FAST))

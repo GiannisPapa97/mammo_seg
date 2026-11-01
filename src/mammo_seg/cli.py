@@ -164,6 +164,25 @@ def build_parser() -> argparse.ArgumentParser:
         "decoder learns, then train every layer",
     )
     training.add_argument(
+        "--tversky-alpha",
+        type=float,
+        default=0.5,
+        help="the weight of the missed mass pixels in the Tversky index of the loss; "
+        "with --tversky-beta 0.5 and --focal-gamma 1, the loss is soft Dice",
+    )
+    training.add_argument(
+        "--tversky-beta",
+        type=float,
+        default=0.5,
+        help="the weight of the false positive pixels in the Tversky index",
+    )
+    training.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=1.0,
+        help="the exponent of 1 - Tversky index (focal Tversky: 0.75)",
+    )
+    training.add_argument(
         "--positive-fraction",
         type=_fraction_or_none,
         default=0.5,
@@ -435,6 +454,9 @@ def _train(args: argparse.Namespace) -> int:
             seed=args.seed,
             num_workers=args.num_workers,
             freeze_encoder_epochs=args.freeze_encoder_epochs,
+            tversky_alpha=args.tversky_alpha,
+            tversky_beta=args.tversky_beta,
+            focal_gamma=args.focal_gamma,
         )
         # The images are read with the settings they were preprocessed with, which
         # also decide the input channels of the model.
