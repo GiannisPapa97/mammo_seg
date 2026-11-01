@@ -3,7 +3,9 @@
 Built on torchvision ``transforms.v2``: geometric changes (rotation, scale and
 shift, then an optional elastic deformation) move the image and its mask the same
 way, with the mask resampled by nearest neighbour so it stays 0/1. Intensity
-changes (brightness, contrast, gamma, noise) only touch the image. An optional crop
+changes (brightness, contrast, gamma, noise) only touch the image; on an image of
+two channels (the image and its CLAHE), brightness, contrast and noise are drawn
+for each channel on its own, and the gamma is shared. An optional crop
 then cuts a patch out of both. The
 masses cover well under 1% of an image, so a uniformly random patch seldom holds
 one: with probability ``crop_mass_fraction`` the patch is placed around a randomly
@@ -94,8 +96,9 @@ class AugmentationSettings:
 class Augmentation:
     """A transform for ``MammogramDataset``: ``(image, mask) -> (image, mask)``.
 
-    Both are ``[1, H, W]`` float tensors, the image in 0..1 and the mask 0/1. The
-    result has the same shape, or ``crop_size`` when it is set.
+    Both are float tensors, the image ``[C, H, W]`` in 0..1 and the mask
+    ``[1, H, W]`` 0/1. The result has the same shapes, or ``crop_size`` when it is
+    set.
     """
 
     def __init__(self, settings: AugmentationSettings = AugmentationSettings()) -> None:  # noqa: B008
@@ -150,18 +153,22 @@ class Augmentation:
             )
             moved_image = tv_tensors.Image(bent_image)
             moved_mask = tv_tensors.Mask(bent_mask)
-        background = moved_image.as_subclass(torch.Tensor) == 0
-        changed = self.intensity(moved_image)
+        # The background of the first channel, the image; a CLAHE channel has the
+        # same background.
+        background = moved_image.as_subclass(torch.Tensor)[:1] == 0
+        # ColorJitter takes one or three channels, so each channel goes on its own.
+        changed = torch.cat(
+            [
+                self.intensity(tv_tensors.Image(channel)).as_subclass(torch.Tensor)
+                for channel in moved_image.as_subclass(torch.Tensor).split(1)
+            ]
+        )
         if self.settings.gamma:
             low, high = 1 - self.settings.gamma, 1 + self.settings.gamma
             exponent = low + (high - low) * torch.rand(()).item()
             changed = changed.clamp(min=0) ** exponent
         # The background stays exactly 0, as validation and inference see it.
-        result = (
-            changed.as_subclass(torch.Tensor)
-            .clamp(0.0, 1.0)
-            .masked_fill(background, 0.0)
-        )
+        result = changed.clamp(0.0, 1.0).masked_fill(background, 0.0)
         mask_result = moved_mask.as_subclass(torch.Tensor)
         if self.settings.crop_size is not None:
             return self._crop(result, mask_result, kind)

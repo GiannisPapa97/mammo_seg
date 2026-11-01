@@ -19,7 +19,7 @@ trained on a GPU and used on a CPU:
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -122,13 +122,7 @@ def model_from_checkpoint(checkpoint: Checkpoint) -> nn.Module:
 
     No pretrained weights are downloaded: random ones are replaced by the saved ones.
     """
-    model = build_model(
-        ModelSettings(
-            architecture=checkpoint.model_settings.architecture,
-            encoder=checkpoint.model_settings.encoder,
-            encoder_weights=None,
-        )
-    )
+    model = build_model(replace(checkpoint.model_settings, encoder_weights=None))
     model.load_state_dict(checkpoint.model_state)
     return model
 

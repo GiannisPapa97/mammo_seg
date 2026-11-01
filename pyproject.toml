@@ -12,6 +12,7 @@ dependencies = [
     "pillow>=13.0.0",
     "pydantic>=2.14.1",
     "pydicom>=3.0.2",
+    "scikit-image>=0.26",
     "scikit-learn>=1.9.1",
     "scipy>=1.17.1",
 ]

@@ -399,6 +399,7 @@ def _train(args: argparse.Namespace) -> int:
         from mammo_seg.data.augmentation import AugmentationSettings
         from mammo_seg.data.dataset import canvas_of
         from mammo_seg.data.loaders import BatchComposition
+        from mammo_seg.data.preprocessing import input_channels
         from mammo_seg.device import resolve_device
         from mammo_seg.engine.model import ModelSettings
         from mammo_seg.engine.train import TrainingSettings, train_fold
@@ -435,10 +436,14 @@ def _train(args: argparse.Namespace) -> int:
             num_workers=args.num_workers,
             freeze_encoder_epochs=args.freeze_encoder_epochs,
         )
+        # The images are read with the settings they were preprocessed with, which
+        # also decide the input channels of the model.
+        record = read_record(args.preprocessed_dir / RECORD_FILE)
         model_settings = ModelSettings(
             architecture=args.architecture,
             encoder=args.encoder,
             encoder_weights=None if args.encoder_weights == "none" else "imagenet",
+            in_channels=input_channels(record.settings),
         )
         augmentation = AugmentationSettings(
             **{name: getattr(args, name) for name in AUGMENTATION_OPTIONS},
@@ -447,8 +452,6 @@ def _train(args: argparse.Namespace) -> int:
             else None,
             crop_mass_fraction=args.crop_mass_fraction,
         )
-        # The images are read with the settings they were preprocessed with.
-        record = read_record(args.preprocessed_dir / RECORD_FILE)
         with _training_log():
             result = train_fold(
                 manifest.read_manifest(args.manifest),

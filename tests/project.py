@@ -7,6 +7,7 @@ from tests.data.manifests import make_manifest
 from tests.data.preprocessed import SETTINGS, write_preprocessed_for
 
 from mammo_seg.data.manifest import write_manifest
+from mammo_seg.data.preprocessing import PreprocessingSettings
 from mammo_seg.data.splits import create_splits_file, write_splits
 
 
@@ -40,8 +41,9 @@ class Project:
         ]
 
 
-def make_project(root: Path) -> Project:
-    """Eight patients (four with a mass), two images each, split into two folds."""
+def make_project(root: Path, settings: PreprocessingSettings = SETTINGS) -> Project:
+    """Eight patients (four with a mass), two images each, split into two folds,
+    preprocessed with ``settings``."""
     manifest = make_manifest(4, 4, per_patient=2)
     files = Project(
         manifest=root / "manifest.json",
@@ -51,5 +53,5 @@ def make_project(root: Path) -> Project:
     )
     write_manifest(manifest, files.manifest)
     write_splits(create_splits_file(manifest, 2), files.splits)
-    write_preprocessed_for(files.preprocessed, SETTINGS, manifest)
+    write_preprocessed_for(files.preprocessed, settings, manifest)
     return files

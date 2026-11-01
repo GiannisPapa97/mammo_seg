@@ -1,9 +1,10 @@
 import pickle
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from mammo_seg.data.preprocessing import PreprocessingSettings
 from mammo_seg.engine import checkpoint as checkpoint_module
@@ -62,6 +63,24 @@ def test_a_rebuilt_model_gives_the_same_output(
     save_checkpoint(tmp_path / "model.pt", model, SETTINGS, PREPROCESSING)
     rebuilt = model_from_checkpoint(load_checkpoint(tmp_path / "model.pt"))
     assert torch.equal(outputs(rebuilt), outputs(model))
+
+
+def test_a_model_of_two_input_channels_is_rebuilt_with_two(tmp_path: Path) -> None:
+    two = replace(SETTINGS, in_channels=2)
+    torch.manual_seed(0)
+    model = build_model(two).eval()
+    save_checkpoint(tmp_path / "model.pt", model, two, PREPROCESSING)
+    rebuilt = model_from_checkpoint(load_checkpoint(tmp_path / "model.pt")).eval()
+    images = torch.rand(1, 2, 64, 64)
+    with torch.no_grad():
+        assert torch.equal(rebuilt(images), model(images))
+
+
+def test_model_settings_saved_before_the_input_channels_read_as_one() -> None:
+    old = '{"architecture": "unet", "encoder": "resnet18", "encoder_weights": null}'
+    read = TypeAdapter(ModelSettings).validate_json(old)
+    assert read == ModelSettings(encoder="resnet18", encoder_weights=None)
+    assert read.in_channels == 1
 
 
 def test_a_rebuilt_model_never_asks_for_pretrained_weights(

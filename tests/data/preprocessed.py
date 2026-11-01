@@ -9,8 +9,10 @@ from mammo_seg.data.masks import write_mask
 from mammo_seg.data.preprocess_dataset import (
     RECORD_FILE,
     PreprocessingRecord,
+    clahe_path,
     image_path,
     processed_mask_path,
+    write_clahe,
     write_image,
     write_record,
 )
@@ -18,6 +20,8 @@ from mammo_seg.data.preprocessing import (
     BoundingBox,
     PreprocessingSettings,
     PreprocessParams,
+    enhance_contrast,
+    normalize_intensity,
 )
 from mammo_seg.data.schema import Manifest
 
@@ -37,7 +41,8 @@ def write_preprocessed(
     """Small preprocessed images: a ramp of intensities, a mass mask where asked.
 
     With ``visible_mass`` the mass is also a bright patch in the image, so that a
-    model can learn to tell images with a mass from those without.
+    model can learn to tell images with a mass from those without. With
+    ``settings.clahe``, the CLAHE images are written too.
     """
     params = {}
     for file_id, width in widths.items():
@@ -49,6 +54,11 @@ def write_preprocessed(
                 pixels[10:20, 5:15] = 4095
         write_image(pixels, image_path(directory, file_id))
         write_mask(mask, processed_mask_path(directory, file_id))
+        if settings.clahe is not None:
+            enhanced = enhance_contrast(
+                normalize_intensity(pixels, settings), settings.clahe
+            )
+            write_clahe(enhanced, clahe_path(directory, file_id))
         params[file_id] = PreprocessParams(
             source_shape=(400, 300),
             box=BoundingBox(top=0, bottom=400, left=0, right=200),

@@ -283,6 +283,7 @@ CBIS-DDSM: 1514 masks, all with a mass (1618 masses), each mask image with exact
 uv run python -m mammo_seg.data.preprocess_dataset                       # INbreast, about 3.5 minutes
 uv run python -m mammo_seg.data.preprocess_dataset --size 768            # another size
 uv run python -m mammo_seg.data.preprocess_dataset --dataset cbis-ddsm   # CBIS-DDSM
+uv run python -m mammo_seg.data.preprocess_dataset --clahe 0.01          # with a CLAHE channel
 ```
 
 `--dataset` chooses the default paths (in `data/raw/<dataset>/` and `data/processed/<dataset>/`) and the settings of the dataset (`DATASET_SETTINGS`, see [CBIS-DDSM](#cbis-ddsm) below).
@@ -296,6 +297,7 @@ uv run python -m mammo_seg.data.preprocess_dataset --dataset cbis-ddsm   # CBIS-
 | Rescale | `preprocess(...)` | The crop is resized so its longer side is `size` (1024), by averaging the source pixels |
 | Flip | `preprocess(...)` | Right breasts are flipped horizontally (`orientation` `laterality`), or the images whose chest wall is on the right (`image`, found by `chest_wall_on_right`), so the chest wall is on the left in every image |
 | Normalize | `normalize_intensity(pixels)` | Scales to 0..1. Not stored: it runs when an image is loaded and at inference |
+| Enhance (optional) | `enhance_contrast(image, clip_limit)` | With `clahe` set: the normalized image after CLAHE, the second input channel (see [Contrast enhancement](#contrast-enhancement-clahe)). Stored, because it takes about 0.06 s per image |
 
 `preprocess(pixels, laterality, settings)` runs crop, rescale and flip and returns the image together with a `PreprocessParams` record (the crop box, the size of the result and whether it was flipped). `preprocess_mask(mask, params)` applies the same geometry to a mask, `preprocess_points(points, params)` to points such as the polygons of the annotations, and `restore_mask(mask, params)` maps a predicted mask back onto the original image. At inference a DICOM goes through `read_pixels`, `preprocess` and `normalize_intensity`, exactly like the stored training images.
 
@@ -323,8 +325,9 @@ On the real data the box covers a median of 46% of the image (16% to 76%). All 4
 | `film_edge_depth` | 0 (off) | Bright film edges are cleared from the breast mask, on the three sides away from the chest wall, if they end within this share of the side (`clear_film_edges`) |
 | `film_edge_coverage` | 0.8 | A row or column of a film edge has more than this share of bright pixels |
 | `clear_background` | none (off) | The pixels outside the breast region, widened by this many mask pixels, are set to 0 before cropping |
+| `clahe` | none (off) | The clip limit of CLAHE for a second input channel (`--clahe`), in scikit-image's convention |
 
-The five last settings came with CBIS-DDSM. A `preprocessing.json` or checkpoint written before them reads as before, with the defaults, so the INbreast data and models need no rebuild; a newly written INbreast `preprocessing.json` has these keys more, with the same values otherwise.
+The five settings from `border` to `clear_background` came with CBIS-DDSM, and `clahe` after them. A `preprocessing.json` or checkpoint written before them reads as before, with the defaults, so the INbreast data and models need no rebuild; a newly written INbreast `preprocessing.json` has these keys more, with the same values otherwise, so its sha256 differs from that of an older file of the same data.
 
 ### Intensity normalization
 
@@ -332,12 +335,24 @@ The default is a fixed divisor of 4095 (clipped at 1): the images come from one 
 
 Most images do not use the whole range. In the 410 preprocessed images the largest value is exactly 4095 and none is above it, but only 12 images reach it: the brightest pixel of an image has a median of 2413 (lowest 1772, 95th percentile 4021). A typical image therefore reaches about 0.6 after normalization.
 
+### Contrast enhancement (CLAHE)
+
+INbreast has a low contrast: the tissue of a normalized image lies at about 0.27 to 0.43, and papers on it equalize the histogram or window the intensities before segmenting (for example CLAHE in ConnectedUNets++, arXiv 2210.13668; histogram equalization of the crops in arXiv 2002.12079; a window around the tissue in Ribli et al., arXiv 1707.08401). With `--clahe CLIP_LIMIT`, the model gets two input channels: the normalized image, unchanged, and the same image after CLAHE (contrast-limited adaptive histogram equalization, `skimage.exposure.equalize_adapthist`). Keeping the original means the model loses nothing it had before: CLAHE alone would change how bright a large mass is against the rest of the breast.
+
+- **How:** the image is split into 8 x 8 tiles (at 1024, 128 px high and 34 to 98 px wide), the histogram of each tile is equalized with its peaks clipped at the clip limit (a share of the tile's pixels; 0.01 is scikit-image's default), and the mappings of neighbouring tiles are blended. The background is set back to 0 after, as the equalization lifts it.
+- **Per image:** nothing is learned from other images, so it is the same for training and inference and cannot leak between splits. It runs on the normalized image during preprocessing, and the result is stored (`clahe/`), since it takes about 0.06 s per 1024 image: about 20 s of CPU time for an epoch of 256 training and about 65 validation images, as long as such an epoch takes on a Kaggle T4.
+- **The model:** smp gives the two channels the pretrained weights of the red and green channels of the first layer, scaled by 3/2 (see [training.md](training.md#3-the-model)); the number of input channels is stored in the checkpoint and follows from the preprocessing.
+- **Augmentation:** the geometric changes move both channels together; brightness, contrast and noise are drawn for each channel on its own, and the gamma is shared.
+
+**On the real data** (30 random preprocessed images with a mass, aggregate figures only): CLAHE at 0.01 stretches the difference between a mass and the tissue in a band of 15 px around it by a median of 3.4 times, but it stretches the texture of that tissue more, so the mass stands out less against it: the contrast-to-noise ratio (the difference divided by the standard deviation of the band) falls to a median of 0.91 of its value, and is lower in 21 of the 30 images. A higher clip limit stretches more and lowers it further (0.78 at 0.02, 0.67 at 0.04); 0.005 gives 0.96. So CLAHE does not make the masses easier to see by this measure; whether a network finds them better with it is for a training run to show.
+
 ### Stored format
 
 Written to `data/processed/inbreast/preprocessed/`:
 
 - `images/<file_id>.png`: the preprocessed image, 16-bit (values unchanged apart from the averaging of the rescale). The values stay in the 12-bit range 0 to 4095 of the scanner, about a sixteenth of what a 16-bit file can hold, so an image viewer that maps 0 to 65535 to black and white shows them dark and flat. Stretch the display range to 0 to 4095 to see them normally; the model is not affected, because the values are divided by 4095 when loaded. The CBIS-DDSM images keep their 8-bit values 0 to 255 in the same 16-bit files, so a viewer shows them black: stretch the range to 0 to 255, or use `notebooks/13_cbis_ddsm_preprocessing_review.ipynb`
 - `masks/<file_id>.png`: its mass mask, 8-bit with the values 0 and 255 (read it with `read_mask`)
+- `clahe/<file_id>.png`: with `--clahe`, the normalized image after CLAHE, 16-bit, 0 to 65535 for 0 to 1 (read it with `read_clahe`)
 - `preprocessing.json`: the settings and, for every image, `PreprocessParams` (source shape, crop box, result shape, flip)
 
 All 410 images are processed, including the excluded `FB` view, which is only left out of the splits. The 410 images and masks take 168 MB.
@@ -432,7 +447,7 @@ PyTorch is an extra that picks its build (see the README): `uv sync --extra cpu`
 
 | Key | Content |
 |---|---|
-| `image` | float32 `[1, 1024, 800]`, normalized to 0..1 by `normalize_intensity`, 0 on the padding |
+| `image` | float32 `[1, 1024, 800]`, normalized to 0..1 by `normalize_intensity`, 0 on the padding; `[2, 1024, 800]` with CLAHE, the second channel the stored CLAHE image |
 | `mask` | float32 `[1, 1024, 800]`, 1 on a mass |
 | `valid` | bool `[1, 1024, 800]`, true on the image, false on the padding |
 | `file_id` | the image id |
@@ -452,7 +467,7 @@ Images are padded on the right and at the bottom to the 1024 x 800 canvas. Every
 | `rotation` | 10 | degrees, either way |
 | `scale` | 0.1 | zoom by 1 +- 0.1 |
 | `shift` | 0.1 | of the width and height |
-| `brightness`, `contrast` | 0.1 | factor 1 +- 0.1, the breast only |
+| `brightness`, `contrast` | 0.1 | factor 1 +- 0.1, the breast only; drawn for each channel on its own with CLAHE |
 | `gamma` | 0.2 | exponent 1 +- 0.2, the breast only |
 | `noise` | 0.01 | Gaussian, standard deviation, the breast only |
 | `elastic` | 0 (off) | elastic deformation: standard deviation of the displacement at the control points, in pixels |
