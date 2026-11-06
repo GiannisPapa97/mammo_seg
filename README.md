@@ -1,5 +1,7 @@
 # MammoSeg
 
+[![CI](https://github.com/GiannisPapa97/mammo_seg/actions/workflows/ci.yaml/badge.svg)](https://github.com/GiannisPapa97/mammo_seg/actions/workflows/ci.yaml)
+
 A reproducible PyTorch research project for segmenting masses in mammograms, on the INbreast dataset, with CBIS-DDSM for pretraining. It trains U-Net and other encoder-decoder architectures on ImageNet-pretrained encoders; the results so far are all from U-Nets with ResNet encoders.
 
 > **Research use only.** This project is not a medical device and its output must not be used for clinical decisions.
